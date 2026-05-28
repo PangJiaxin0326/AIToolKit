@@ -25,20 +25,6 @@ public enum WorkflowSchema {
 
     public static func specSchema(availableTools: [ToolDescriptor]) -> ToolSchema {
         let toolNames = availableTools.map(\.name).sorted()
-        let refSchema = ToolSchema.strictObject(
-            properties: [
-                "$ref": .strictObject(
-                    properties: [
-                        "source": .stringEnum(["node", "context", "user_input"]),
-                        "node": .nullable(.string(description: "Referenced node id for node refs.")),
-                        "path": .string(description: "JSON Pointer path, or empty for the whole value."),
-                    ],
-                    required: ["source", "node", "path"],
-                    description: "Reference to a node output, context value, or user input."
-                ),
-            ],
-            required: ["$ref"]
-        )
         let retry = ToolSchema.strictObject(
             properties: [
                 "max_attempts": .integer,
@@ -80,7 +66,7 @@ public enum WorkflowSchema {
         let final = ToolSchema.strictObject(
             properties: [
                 "kind": .stringEnum(["value", "template", "node_output", "message"]),
-                "value": .nullable(refSchema),
+                "value": .nullable(.any),
                 "template": .nullable(.string(description: "Template with {{binding}} placeholders.")),
                 "bindings": .unknownObject,
                 "node": .nullable(.string(description: "Node id for node_output final.")),
@@ -130,9 +116,10 @@ public enum WorkflowPromptBuilder {
             }
             .joined(separator: "\n")
         return """
-        For requests requiring multiple tools, emit one WorkflowSpec JSON object \
-        or call the synthetic \(WorkflowSpec.toolName) tool with that object. \
-        Do not emit separate tool calls. Use schema_version "\(WorkflowSpec.schemaVersion)".
+        For requests requiring tools, emit one WorkflowSpec JSON object, a \
+        fenced `workflow` block containing that object, or call the synthetic \
+        \(WorkflowSpec.toolName) tool with that object. Do not emit separate \
+        tool calls. Use schema_version "\(WorkflowSpec.schemaVersion)".
 
         WorkflowSpec is a topological DAG. Put independent read/source nodes \
         first, then later nodes with inputs using {"$ref":{"source":"node",\

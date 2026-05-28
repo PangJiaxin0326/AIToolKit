@@ -12,6 +12,7 @@ public struct ToolSchema: Sendable, Hashable {
     public static let number = ToolSchema(json: .object(["type": .string("number")]))
     public static let integer = ToolSchema(json: .object(["type": .string("integer")]))
     public static let boolean = ToolSchema(json: .object(["type": .string("boolean")]))
+    public static let any = ToolSchema(json: .object([:]))
     public static let unknownObject = ToolSchema.object(properties: [:])
 
     public static func string(description: String) -> ToolSchema {

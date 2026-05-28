@@ -18,6 +18,33 @@ public actor WorkflowResultStore {
     }
 }
 
+public enum WorkflowOutputRedactor {
+    public static func diagnosticValue(
+        _ value: JSONValue,
+        node: WorkflowNode,
+        descriptor: ToolDescriptor?
+    ) -> JSONValue {
+        guard node.outputPolicy.redaction == .toolDefault else { return value }
+        if descriptor?.annotations?.sensitiveOutput == ToolAnnotations.SensitiveOutput.none {
+            return value
+        }
+        return redact(value)
+    }
+
+    private static func redact(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .string:
+            return .string("[REDACTED]")
+        case .array(let values):
+            return .array(values.map(redact))
+        case .object(let object):
+            return .object(object.mapValues(redact))
+        case .null, .bool, .int, .number:
+            return value
+        }
+    }
+}
+
 public enum WorkflowFinalRenderer {
     public static func render(
         _ final: WorkflowFinal,

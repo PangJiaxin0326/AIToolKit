@@ -11,6 +11,8 @@ public enum WorkflowError: Error, Sendable, Hashable, CustomStringConvertible {
     case maxParallelismInvalid(Int)
     case deadlineExceededLimit(Int)
     case outputLimitExceeded(nodeID: String, bytes: Int, limit: Int)
+    case workflowTimedOut(deadlineMS: Int)
+    case nodeTimedOut(nodeID: String, timeoutMS: Int)
     case missingTool(nodeID: String)
     case unavailableTool(nodeID: String, tool: String)
     case unknownDependency(nodeID: String, dependency: String)
@@ -45,6 +47,10 @@ public enum WorkflowError: Error, Sendable, Hashable, CustomStringConvertible {
             "Workflow deadline exceeds allowed limit: \(value)ms"
         case .outputLimitExceeded(let nodeID, let bytes, let limit):
             "Node \(nodeID) output is \(bytes) bytes, exceeding limit \(limit)"
+        case .workflowTimedOut(let deadlineMS):
+            "Workflow timed out after \(deadlineMS)ms"
+        case .nodeTimedOut(let nodeID, let timeoutMS):
+            "Node \(nodeID) timed out after \(timeoutMS)ms"
         case .missingTool(let nodeID):
             "Tool node \(nodeID) is missing a tool name"
         case .unavailableTool(let nodeID, let tool):

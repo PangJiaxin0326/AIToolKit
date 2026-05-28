@@ -72,26 +72,61 @@ public struct WorkflowExecutor: Sendable {
 
         let store = WorkflowResultStore()
         var trace = WorkflowTrace(workflowID: spec.workflowID)
+        let workflowDeadline = ContinuousClock.now.advanced(
+            by: .milliseconds(spec.limits.deadlineMS)
+        )
+        var skipped = Set<String>()
         for level in validated.levels {
             try Task.checkCancellation()
+            try checkWorkflowDeadline(workflowDeadline, spec: spec)
             for chunk in chunks(level, size: max(1, spec.limits.maxParallelism)) {
+                let runnable = chunk.filter {
+                    (validated.dependencies[$0.id] ?? []).isDisjoint(with: skipped)
+                }
+                let skippedNodes = chunk.filter { node in
+                    !((validated.dependencies[node.id] ?? []).isDisjoint(with: skipped))
+                }
+                for node in skippedNodes {
+                    skipped.insert(node.id)
+                    trace.nodes.append(WorkflowNodeTrace(
+                        nodeID: node.id,
+                        tool: node.tool,
+                        status: .skipped,
+                        endedAt: Date(),
+                        error: "Skipped because a dependency was skipped."
+                    ))
+                }
+                guard !runnable.isEmpty else { continue }
                 let snapshot = await store.snapshot()
                 let results = try await runChunk(
-                    chunk,
+                    runnable,
                     snapshot: snapshot,
-                    context: context
+                    context: context,
+                    descriptors: validated.descriptors,
+                    workflowDeadline: workflowDeadline,
+                    workflowDeadlineMS: spec.limits.deadlineMS
                 )
                 for result in results {
                     await store.set(result.output, for: result.node.id)
                     trace.nodes.append(result.trace)
+                    if result.skipDependents {
+                        skipped.insert(result.node.id)
+                    }
                 }
             }
         }
 
         let outputs = await store.snapshot()
+        let exposedOutputs: [String: JSONValue] = Dictionary(
+            uniqueKeysWithValues: outputs.compactMap { id, output -> (String, JSONValue)? in
+            guard spec.nodes.first(where: { $0.id == id })?.outputPolicy.exposeToFinal == true
+            else { return nil }
+            return (id, output)
+            }
+        )
         let rendered = try WorkflowFinalRenderer.render(
             spec.final,
-            outputs: outputs,
+            outputs: exposedOutputs,
             context: context.context,
             userInput: context.userInput
         )
@@ -101,7 +136,7 @@ public struct WorkflowExecutor: Sendable {
             mode: spec.mode,
             finalValue: rendered.value,
             finalText: rendered.text,
-            nodeOutputs: outputs,
+            nodeOutputs: exposedOutputs,
             trace: trace
         )
     }
@@ -110,17 +145,28 @@ public struct WorkflowExecutor: Sendable {
         let node: WorkflowNode
         let output: JSONValue
         let trace: WorkflowNodeTrace
+        let skipDependents: Bool
     }
 
     private func runChunk(
         _ nodes: [WorkflowNode],
         snapshot: [String: JSONValue],
-        context: WorkflowExecutionContext
+        context: WorkflowExecutionContext,
+        descriptors: [String: ToolDescriptor],
+        workflowDeadline: ContinuousClock.Instant,
+        workflowDeadlineMS: Int
     ) async throws -> [NodeRunResult] {
         try await withThrowingTaskGroup(of: NodeRunResult.self) { group in
             for node in nodes {
                 group.addTask {
-                    try await runNode(node, snapshot: snapshot, context: context)
+                    try await runNode(
+                        node,
+                        snapshot: snapshot,
+                        context: context,
+                        descriptors: descriptors,
+                        workflowDeadline: workflowDeadline,
+                        workflowDeadlineMS: workflowDeadlineMS
+                    )
                 }
             }
             var results: [NodeRunResult] = []
@@ -134,9 +180,13 @@ public struct WorkflowExecutor: Sendable {
     private func runNode(
         _ node: WorkflowNode,
         snapshot: [String: JSONValue],
-        context: WorkflowExecutionContext
+        context: WorkflowExecutionContext,
+        descriptors: [String: ToolDescriptor],
+        workflowDeadline: ContinuousClock.Instant,
+        workflowDeadlineMS: Int
     ) async throws -> NodeRunResult {
         let started = Date()
+        try checkWorkflowDeadline(workflowDeadline, specDeadlineMS: workflowDeadlineMS)
         let resolvedInput = try WorkflowReferenceResolver.resolve(
             node.input,
             outputs: snapshot,
@@ -144,6 +194,9 @@ public struct WorkflowExecutor: Sendable {
             userInput: context.userInput,
             currentNodeID: node.id
         )
+        if let descriptor = node.tool.flatMap({ descriptors[$0] }) {
+            try validate(resolvedInput, schema: descriptor.inputSchema, nodeID: node.id, label: "input")
+        }
 
         let maxAttempts = max(1, node.policy.retry.maxAttempts)
         var attempts = 0
@@ -152,7 +205,18 @@ public struct WorkflowExecutor: Sendable {
             attempts += 1
             do {
                 try Task.checkCancellation()
-                let output = try await dispatch(node, resolvedInput, context)
+                try checkWorkflowDeadline(workflowDeadline, specDeadlineMS: workflowDeadlineMS)
+                let output = try await withNodeTimeout(
+                    node,
+                    workflowDeadline: workflowDeadline,
+                    workflowDeadlineMS: workflowDeadlineMS
+                ) {
+                    try await dispatch(node, resolvedInput, context)
+                }
+                if let descriptor = node.tool.flatMap({ descriptors[$0] }),
+                   let outputSchema = descriptor.outputSchema {
+                    try validate(output, schema: outputSchema, nodeID: node.id, label: "output")
+                }
                 try validateOutputSize(output, node: node)
                 return NodeRunResult(
                     node: node,
@@ -164,7 +228,8 @@ public struct WorkflowExecutor: Sendable {
                         attempts: attempts,
                         startedAt: started,
                         endedAt: Date()
-                    )
+                    ),
+                    skipDependents: false
                 )
             } catch {
                 lastError = error
@@ -183,18 +248,27 @@ public struct WorkflowExecutor: Sendable {
             return NodeRunResult(
                 node: node,
                 output: .null,
-                trace: failedTrace(node: node, attempts: attempts, started: started, error: lastError)
+                trace: failedTrace(node: node, attempts: attempts, started: started, error: lastError),
+                skipDependents: false
             )
         case .continueWithDefault:
             if let defaultOutput = node.policy.defaultOutput {
                 return NodeRunResult(
                     node: node,
                     output: defaultOutput,
-                    trace: failedTrace(node: node, attempts: attempts, started: started, error: lastError)
+                    trace: failedTrace(node: node, attempts: attempts, started: started, error: lastError),
+                    skipDependents: false
                 )
             }
             fallthrough
-        case .abort, .skipDependents:
+        case .skipDependents:
+            return NodeRunResult(
+                node: node,
+                output: .null,
+                trace: failedTrace(node: node, attempts: attempts, started: started, error: lastError),
+                skipDependents: true
+            )
+        case .abort:
             throw WorkflowError.nodeFailed(
                 nodeID: node.id,
                 message: lastError.map { String(describing: $0) } ?? "unknown"
@@ -232,6 +306,76 @@ public struct WorkflowExecutor: Sendable {
                 bytes: bytes,
                 limit: node.outputPolicy.maxBytes
             )
+        }
+    }
+
+    private func validate(
+        _ value: JSONValue,
+        schema: JSONValue,
+        nodeID: String,
+        label: String
+    ) throws {
+        do {
+            try JSONSchemaValidator.validate(value, schema: schema)
+        } catch {
+            throw WorkflowError.nodeFailed(
+                nodeID: nodeID,
+                message: "\(label) schema validation failed: \(error)"
+            )
+        }
+    }
+
+    private func checkWorkflowDeadline(
+        _ deadline: ContinuousClock.Instant,
+        spec: WorkflowSpec
+    ) throws {
+        try checkWorkflowDeadline(deadline, specDeadlineMS: spec.limits.deadlineMS)
+    }
+
+    private func checkWorkflowDeadline(
+        _ deadline: ContinuousClock.Instant,
+        specDeadlineMS: Int
+    ) throws {
+        if ContinuousClock.now >= deadline {
+            throw WorkflowError.workflowTimedOut(deadlineMS: specDeadlineMS)
+        }
+    }
+
+    private func withNodeTimeout<T: Sendable>(
+        _ node: WorkflowNode,
+        workflowDeadline: ContinuousClock.Instant,
+        workflowDeadlineMS: Int,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let now = ContinuousClock.now
+        let nodeDeadline: ContinuousClock.Instant?
+        if node.policy.timeoutMS > 0 {
+            nodeDeadline = now.advanced(by: .milliseconds(node.policy.timeoutMS))
+        } else {
+            nodeDeadline = nil
+        }
+        let deadline = nodeDeadline.map { min($0, workflowDeadline) } ?? workflowDeadline
+        let isWorkflowDeadline = deadline == workflowDeadline
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(until: deadline, clock: ContinuousClock())
+                if isWorkflowDeadline {
+                    throw WorkflowError.workflowTimedOut(deadlineMS: workflowDeadlineMS)
+                }
+                throw WorkflowError.nodeTimedOut(
+                    nodeID: node.id,
+                    timeoutMS: node.policy.timeoutMS
+                )
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw WorkflowError.nodeTimedOut(
+                    nodeID: node.id,
+                    timeoutMS: node.policy.timeoutMS
+                )
+            }
+            return result
         }
     }
 

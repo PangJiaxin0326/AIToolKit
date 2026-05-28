@@ -45,7 +45,7 @@ private struct SeedTool: Tool {
         properties: ["value": .string],
         required: ["value"]
     )
-    static let outputSchema = ToolSchema.object(
+    static let outputSchema = ToolSchema.strictObject(
         properties: ["value": .string],
         required: ["value"]
     )
@@ -71,13 +71,30 @@ private struct JoinTool: Tool {
         properties: ["left": .string, "right": .string],
         required: ["left", "right"]
     )
-    static let outputSchema = ToolSchema.object(
+    static let outputSchema = ToolSchema.strictObject(
         properties: ["combined": .string],
         required: ["combined"]
     )
 
     func call(_ input: Input, in context: ToolContext) async throws -> Output {
         Output(combined: "\(input.left)-\(input.right)")
+    }
+}
+
+private struct BadOutputTool: Tool {
+    struct Input: Codable, Sendable {}
+    struct Output: Codable, Sendable { var value: Int }
+
+    static let name = "bad_output"
+    static let description = "Returns output that does not match its schema."
+    static let inputSchema = ToolSchema.object(properties: [:])
+    static let outputSchema = ToolSchema.object(
+        properties: ["value": .string],
+        required: ["value"]
+    )
+
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+        Output(value: 42)
     }
 }
 
@@ -278,6 +295,165 @@ private struct LabelViewTool: ViewTool {
                     availableTools: ["seed", "join"]
                 )
             )
+        }
+    }
+
+    @Test func rejectsInvalidLiteralInputAgainstToolSchema() throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_bad_input",
+            intent: "Bad literal input.",
+            nodes: [
+                WorkflowNode(
+                    id: "left",
+                    tool: "seed",
+                    input: .object(["value": .int(1)])
+                ),
+            ],
+            final: .message("not reached")
+        )
+        #expect(throws: WorkflowError.self) {
+            _ = try WorkflowValidator.validate(
+                spec,
+                policy: WorkflowValidationPolicy(descriptors: [SeedTool.descriptor])
+            )
+        }
+    }
+
+    @Test func rejectsUnknownOutputSchemaPath() throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_bad_path",
+            intent: "Bad reference path.",
+            nodes: [
+                WorkflowNode(
+                    id: "left",
+                    tool: "seed",
+                    input: .object(["value": .string("a")])
+                ),
+                WorkflowNode(
+                    id: "join_values",
+                    tool: "join",
+                    input: .object([
+                        "left": .object(["$ref": .object([
+                            "source": .string("node"),
+                            "node": .string("left"),
+                            "path": .string("/missing"),
+                        ])]),
+                        "right": .string("b"),
+                    ])
+                ),
+            ],
+            final: .nodeOutput("join_values", path: "/combined")
+        )
+        #expect(throws: WorkflowError.self) {
+            _ = try WorkflowValidator.validate(
+                spec,
+                policy: WorkflowValidationPolicy(
+                    descriptors: [SeedTool.descriptor, JoinTool.descriptor]
+                )
+            )
+        }
+    }
+
+    @Test func rejectsFinalReferenceToNonExposedNode() throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_private_final",
+            intent: "Try to expose hidden output.",
+            nodes: [
+                WorkflowNode(
+                    id: "left",
+                    tool: "seed",
+                    input: .object(["value": .string("secret")]),
+                    outputPolicy: WorkflowOutputPolicy(exposeToFinal: false)
+                ),
+            ],
+            final: .nodeOutput("left", path: "/value")
+        )
+        #expect(throws: WorkflowError.self) {
+            _ = try WorkflowValidator.validate(
+                spec,
+                policy: WorkflowValidationPolicy(descriptors: [SeedTool.descriptor])
+            )
+        }
+    }
+
+    @Test func executorSkipsDependentsWhenPolicyRequestsIt() async throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_skip",
+            intent: "Skip dependents.",
+            nodes: [
+                WorkflowNode(
+                    id: "source",
+                    tool: "source",
+                    policy: WorkflowNodePolicy(onError: .skipDependents)
+                ),
+                WorkflowNode(
+                    id: "dependent",
+                    tool: "dependent",
+                    dependsOn: ["source"]
+                ),
+            ],
+            final: .message("Done.")
+        )
+        let validated = try WorkflowValidator.validate(
+            spec,
+            policy: WorkflowValidationPolicy(availableTools: ["source", "dependent"])
+        )
+        let executor = WorkflowExecutor { node, _, _ in
+            if node.id == "source" {
+                throw GenericToolError(message: "source failed")
+            }
+            Issue.record("dependent should have been skipped")
+            return .object([:])
+        }
+        let result = try await executor.execute(validated)
+        #expect(result.finalText == "Done.")
+        #expect(result.trace.nodes.map(\.status).contains(.skipped))
+    }
+
+    @Test func executorEnforcesNodeTimeout() async throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_timeout",
+            intent: "Timeout slow node.",
+            nodes: [
+                WorkflowNode(
+                    id: "slow",
+                    tool: "slow",
+                    policy: WorkflowNodePolicy(timeoutMS: 5)
+                ),
+            ],
+            final: .message("not reached")
+        )
+        let validated = try WorkflowValidator.validate(
+            spec,
+            policy: WorkflowValidationPolicy(availableTools: ["slow"])
+        )
+        let executor = WorkflowExecutor { _, _, _ in
+            try await Task.sleep(for: .milliseconds(200))
+            return .object([:])
+        }
+        await #expect(throws: WorkflowError.self) {
+            _ = try await executor.execute(validated)
+        }
+    }
+
+    @Test func executorValidatesOutputSchema() async throws {
+        let registry = ToolRegistry()
+        await registry.register(BadOutputTool())
+        let descriptors = await registry.registeredDescriptors()
+        let spec = WorkflowSpec(
+            workflowID: "wf_bad_output",
+            intent: "Bad output.",
+            nodes: [
+                WorkflowNode(id: "bad", tool: BadOutputTool.name),
+            ],
+            final: .message("not reached")
+        )
+        let validated = try WorkflowValidator.validate(
+            spec,
+            policy: WorkflowValidationPolicy(descriptors: descriptors)
+        )
+        await #expect(throws: WorkflowError.self) {
+            _ = try await WorkflowExecutor(registry: registry).execute(validated)
         }
     }
 }

@@ -51,15 +51,18 @@ public struct ValidatedWorkflow: Sendable, Hashable {
     public var spec: WorkflowSpec
     public var dependencies: [String: Set<String>]
     public var levels: [[WorkflowNode]]
+    public var descriptors: [String: ToolDescriptor]
 
     public init(
         spec: WorkflowSpec,
         dependencies: [String: Set<String>],
-        levels: [[WorkflowNode]]
+        levels: [[WorkflowNode]],
+        descriptors: [String: ToolDescriptor] = [:]
     ) {
         self.spec = spec
         self.dependencies = dependencies
         self.levels = levels
+        self.descriptors = descriptors
     }
 }
 
@@ -74,6 +77,12 @@ public enum WorkflowValidator {
         guard isValidWorkflowID(spec.workflowID) else {
             throw WorkflowError.invalidWorkflowID(spec.workflowID)
         }
+        guard spec.limits.maxNodes > 0 else {
+            throw WorkflowError.nodeLimitExceeded(
+                count: spec.nodes.count,
+                limit: spec.limits.maxNodes
+            )
+        }
         guard spec.nodes.count <= min(spec.limits.maxNodes, policy.maxNodes) else {
             throw WorkflowError.nodeLimitExceeded(
                 count: spec.nodes.count,
@@ -84,7 +93,8 @@ public enum WorkflowValidator {
               spec.limits.maxParallelism <= policy.maxParallelism else {
             throw WorkflowError.maxParallelismInvalid(spec.limits.maxParallelism)
         }
-        guard spec.limits.deadlineMS <= policy.maxDeadlineMS else {
+        guard spec.limits.deadlineMS > 0,
+              spec.limits.deadlineMS <= policy.maxDeadlineMS else {
             throw WorkflowError.deadlineExceededLimit(spec.limits.deadlineMS)
         }
 
@@ -131,6 +141,15 @@ public enum WorkflowValidator {
                     limit: min(policy.maxOutputBytesPerNode, spec.limits.maxOutputBytesPerNode)
                 )
             }
+            if !WorkflowReferenceResolver.references(in: node.input).contains(where: { $0.source == .node }),
+               let descriptor = policy.descriptors[tool] {
+                try validate(
+                    node.input,
+                    schema: descriptor.inputSchema,
+                    nodeID: node.id,
+                    label: "input"
+                )
+            }
             byID[node.id] = node
             indexByID[node.id] = index
         }
@@ -142,6 +161,13 @@ public enum WorkflowValidator {
                 try validate(reference: reference, currentNodeID: node.id, byID: byID)
                 if reference.source == .node, let referencedNode = reference.node {
                     nodeDependencies.insert(referencedNode)
+                    try validateOutputPath(
+                        reference.path,
+                        referencedNodeID: referencedNode,
+                        currentNodeID: node.id,
+                        byID: byID,
+                        descriptors: policy.descriptors
+                    )
                 }
             }
             for dependency in nodeDependencies {
@@ -163,9 +189,14 @@ public enum WorkflowValidator {
             dependencies[node.id] = nodeDependencies
         }
 
-        try validateFinal(spec.final, byID: byID)
+        try validateFinal(spec.final, byID: byID, descriptors: policy.descriptors)
         let levels = try topologicalLevels(nodes: spec.nodes, dependencies: dependencies)
-        return ValidatedWorkflow(spec: spec, dependencies: dependencies, levels: levels)
+        return ValidatedWorkflow(
+            spec: spec,
+            dependencies: dependencies,
+            levels: levels,
+            descriptors: policy.descriptors
+        )
     }
 
     private static func validate(
@@ -198,7 +229,8 @@ public enum WorkflowValidator {
 
     private static func validateFinal(
         _ final: WorkflowFinal,
-        byID: [String: WorkflowNode]
+        byID: [String: WorkflowNode],
+        descriptors: [String: ToolDescriptor]
     ) throws {
         switch final.kind {
         case .value:
@@ -207,6 +239,7 @@ public enum WorkflowValidator {
             }
             for reference in WorkflowReferenceResolver.references(in: value) {
                 try validate(reference: reference, currentNodeID: "final", byID: byID)
+                try validateFinalReference(reference, byID: byID, descriptors: descriptors)
             }
         case .template:
             guard final.template != nil else {
@@ -215,12 +248,21 @@ public enum WorkflowValidator {
             for binding in final.bindings.values {
                 for reference in WorkflowReferenceResolver.references(in: binding) {
                     try validate(reference: reference, currentNodeID: "final", byID: byID)
+                    try validateFinalReference(reference, byID: byID, descriptors: descriptors)
                 }
             }
         case .nodeOutput:
             guard let node = final.node, byID[node] != nil else {
                 throw WorkflowError.unsupportedFinal(final.kind)
             }
+            try validateNodeExposedToFinal(node, byID: byID)
+            try validateOutputPath(
+                final.path ?? "",
+                referencedNodeID: node,
+                currentNodeID: "final",
+                byID: byID,
+                descriptors: descriptors
+            )
             if let path = final.path, !path.isEmpty, !path.hasPrefix("/") {
                 throw WorkflowError.invalidReference(
                     nodeID: "final",
@@ -257,6 +299,69 @@ public enum WorkflowValidator {
             }
         }
         return levels
+    }
+
+    private static func validate(
+        _ value: JSONValue,
+        schema: JSONValue,
+        nodeID: String,
+        label: String
+    ) throws {
+        do {
+            try JSONSchemaValidator.validate(value, schema: schema)
+        } catch {
+            throw WorkflowError.nodeFailed(
+                nodeID: nodeID,
+                message: "\(label) schema validation failed: \(error)"
+            )
+        }
+    }
+
+    private static func validateFinalReference(
+        _ reference: WorkflowReference,
+        byID: [String: WorkflowNode],
+        descriptors: [String: ToolDescriptor]
+    ) throws {
+        guard reference.source == .node, let node = reference.node else { return }
+        try validateNodeExposedToFinal(node, byID: byID)
+        try validateOutputPath(
+            reference.path,
+            referencedNodeID: node,
+            currentNodeID: "final",
+            byID: byID,
+            descriptors: descriptors
+        )
+    }
+
+    private static func validateNodeExposedToFinal(
+        _ nodeID: String,
+        byID: [String: WorkflowNode]
+    ) throws {
+        guard byID[nodeID]?.outputPolicy.exposeToFinal == true else {
+            throw WorkflowError.invalidReference(
+                nodeID: "final",
+                reason: "node \(nodeID) output is not exposed to final rendering"
+            )
+        }
+    }
+
+    private static func validateOutputPath(
+        _ path: String,
+        referencedNodeID: String,
+        currentNodeID: String,
+        byID: [String: WorkflowNode],
+        descriptors: [String: ToolDescriptor]
+    ) throws {
+        guard let tool = byID[referencedNodeID]?.tool,
+              let schema = descriptors[tool]?.outputSchema,
+              !JSONSchemaValidator.isUnknownObject(schema)
+        else { return }
+        if JSONSchemaValidator.referencePathExists(path, in: schema) == false {
+            throw WorkflowError.invalidReference(
+                nodeID: currentNodeID,
+                reason: "path \(path.isEmpty ? "/" : path) is not present in \(referencedNodeID) output schema"
+            )
+        }
     }
 
     private static func isValidWorkflowID(_ value: String) -> Bool {
