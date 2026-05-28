@@ -105,9 +105,17 @@ public enum WorkflowPromptBuilder {
         let tools = toolManifest
             .map { descriptor in
                 var line = "- \(descriptor.name): \(descriptor.description)"
+                if let text = jsonString(descriptor.inputSchema) {
+                    line += " Input schema: \(text)"
+                }
                 if let output = descriptor.outputSchema,
                    let text = jsonString(output) {
                     line += " Output schema: \(text)"
+                }
+                if let examples = descriptor.inputExamples,
+                   !examples.isEmpty,
+                   let text = jsonString(.array(examples)) {
+                    line += " Input examples: \(text)"
                 }
                 if let annotations = descriptor.annotations {
                     line += " Side effect: \(annotations.sideEffect.rawValue)."

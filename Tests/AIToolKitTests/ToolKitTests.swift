@@ -209,6 +209,43 @@ private struct LabelViewTool: ViewTool {
 }
 
 @Suite struct WorkflowKitTests {
+    @Test func workflowPromptCatalogIncludesInputAndOutputSchemas() throws {
+        let prompt = WorkflowPromptBuilder.planningInstruction(
+            toolManifest: [SeedTool.descriptor]
+        )
+        #expect(prompt.contains("Input schema:"))
+        #expect(prompt.contains("\"value\""))
+        #expect(prompt.contains("Output schema:"))
+        #expect(prompt.contains("Side effect: none."))
+    }
+
+    @Test func workflowOutputRedactorUsesToolSensitivity() {
+        let sensitive = ToolDescriptor(
+            name: "sensitive",
+            description: "Sensitive output.",
+            inputSchema: ToolSchema.object(properties: [:]).json,
+            annotations: ToolAnnotations(sensitiveOutput: .personal)
+        )
+        let publicOutput = ToolDescriptor(
+            name: "public",
+            description: "Public output.",
+            inputSchema: ToolSchema.object(properties: [:]).json,
+            annotations: ToolAnnotations(sensitiveOutput: .none)
+        )
+        let value: JSONValue = .object(["email": .string("alex@example.com")])
+        let node = WorkflowNode(id: "lookup", tool: "sensitive")
+        #expect(
+            WorkflowOutputRedactor.diagnosticValue(
+                value, node: node, descriptor: sensitive
+            ) == .object(["email": .string("[REDACTED]")])
+        )
+        #expect(
+            WorkflowOutputRedactor.diagnosticValue(
+                value, node: node, descriptor: publicOutput
+            ) == value
+        )
+    }
+
     @Test func validatesAndExecutesWorkflowDAG() async throws {
         let registry = ToolRegistry()
         await registry.register(SeedTool())
