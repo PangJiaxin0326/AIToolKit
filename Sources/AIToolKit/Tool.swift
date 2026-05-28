@@ -16,11 +16,18 @@ public protocol Tool: Sendable {
     static var name: String { get }
     static var description: String { get }
     static var inputSchema: ToolSchema { get }
+    static var outputSchema: ToolSchema { get }
+    static var annotations: ToolAnnotations { get }
+    static var inputExamples: [JSONValue] { get }
 
     func call(_ input: Input, in context: ToolContext) async throws -> Output
 }
 
 extension Tool {
+    public static var outputSchema: ToolSchema { .unknownObject }
+    public static var annotations: ToolAnnotations { .default }
+    public static var inputExamples: [JSONValue] { [] }
+
     /// Callable shorthand for direct use outside a registry.
     public func callAsFunction(
         _ input: Input,
@@ -34,9 +41,78 @@ extension Tool {
         ToolDescriptor(
             name: name,
             description: description,
-            inputSchema: inputSchema.json
+            inputSchema: inputSchema.json,
+            outputSchema: outputSchema.json,
+            annotations: annotations,
+            inputExamples: inputExamples
         )
     }
+}
+
+public struct ToolAnnotations: Sendable, Codable, Hashable {
+    public enum SideEffect: String, Sendable, Codable, Hashable {
+        case none
+        case localWrite = "local_write"
+        case networkRead = "network_read"
+        case networkWrite = "network_write"
+        case destructive
+        case externalMessage = "external_message"
+        case payment
+        case auth
+        case unknown
+    }
+
+    public enum SensitiveOutput: String, Sendable, Codable, Hashable {
+        case none
+        case personal
+        case credentials
+        case privateContent = "private_content"
+        case unknown
+    }
+
+    public enum CachePolicy: String, Sendable, Codable, Hashable {
+        case none
+        case memory
+        case disk
+        case session
+    }
+
+    public var isReadOnly: Bool
+    public var isIdempotent: Bool
+    public var sideEffect: SideEffect
+    public var requiresUserApproval: Bool
+    public var allowedWithoutNetwork: Bool
+    public var defaultTimeoutMS: Int
+    public var maxOutputBytes: Int
+    public var sensitiveOutput: SensitiveOutput
+    public var cachePolicy: CachePolicy
+    public var resultSummaryHint: String?
+
+    public init(
+        isReadOnly: Bool = false,
+        isIdempotent: Bool = false,
+        sideEffect: SideEffect = .unknown,
+        requiresUserApproval: Bool = false,
+        allowedWithoutNetwork: Bool = true,
+        defaultTimeoutMS: Int = 5_000,
+        maxOutputBytes: Int = 65_536,
+        sensitiveOutput: SensitiveOutput = .unknown,
+        cachePolicy: CachePolicy = .none,
+        resultSummaryHint: String? = nil
+    ) {
+        self.isReadOnly = isReadOnly
+        self.isIdempotent = isIdempotent
+        self.sideEffect = sideEffect
+        self.requiresUserApproval = requiresUserApproval
+        self.allowedWithoutNetwork = allowedWithoutNetwork
+        self.defaultTimeoutMS = defaultTimeoutMS
+        self.maxOutputBytes = maxOutputBytes
+        self.sensitiveOutput = sensitiveOutput
+        self.cachePolicy = cachePolicy
+        self.resultSummaryHint = resultSummaryHint
+    }
+
+    public static let `default` = ToolAnnotations()
 }
 
 /// Ambient state handed to a tool during invocation.

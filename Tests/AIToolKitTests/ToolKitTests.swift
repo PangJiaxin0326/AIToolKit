@@ -35,6 +35,52 @@ private struct UppercaseTool: Tool {
     }
 }
 
+private struct SeedTool: Tool {
+    struct Input: Codable, Sendable { var value: String }
+    struct Output: Codable, Sendable { var value: String }
+
+    static let name = "seed"
+    static let description = "Returns a seed value."
+    static let inputSchema = ToolSchema.object(
+        properties: ["value": .string],
+        required: ["value"]
+    )
+    static let outputSchema = ToolSchema.object(
+        properties: ["value": .string],
+        required: ["value"]
+    )
+    static let annotations = ToolAnnotations(
+        isReadOnly: true,
+        isIdempotent: true,
+        sideEffect: .none,
+        sensitiveOutput: .none
+    )
+
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+        Output(value: input.value)
+    }
+}
+
+private struct JoinTool: Tool {
+    struct Input: Codable, Sendable { var left: String; var right: String }
+    struct Output: Codable, Sendable { var combined: String }
+
+    static let name = "join"
+    static let description = "Joins two strings."
+    static let inputSchema = ToolSchema.object(
+        properties: ["left": .string, "right": .string],
+        required: ["left", "right"]
+    )
+    static let outputSchema = ToolSchema.object(
+        properties: ["combined": .string],
+        required: ["combined"]
+    )
+
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+        Output(combined: "\(input.left)-\(input.right)")
+    }
+}
+
 private struct LabelViewTool: ViewTool {
     struct Input: Codable, Sendable { var title: String }
 
@@ -89,6 +135,7 @@ private struct LabelViewTool: ViewTool {
         #expect(descriptor.name == EchoTool.name)
         #expect(descriptor.description == EchoTool.description)
         #expect(descriptor.inputSchema == EchoTool.inputSchema.json)
+        #expect(descriptor.outputSchema == EchoTool.outputSchema.json)
     }
 
     @Test func toolCanUseCallAsFunction() async throws {
@@ -129,6 +176,109 @@ private struct LabelViewTool: ViewTool {
         }
         #expect(fields["type"] == .string("object"))
         #expect(fields["required"] == .array([.string("a")]))
+    }
+
+    @Test func strictObjectDisallowsAdditionalProperties() {
+        let schema = ToolSchema.strictObject(
+            properties: ["a": .string],
+            required: ["a"]
+        )
+        guard case let .object(fields) = schema.json else {
+            Issue.record("schema must be an object")
+            return
+        }
+        #expect(fields["additionalProperties"] == .bool(false))
+    }
+}
+
+@Suite struct WorkflowKitTests {
+    @Test func validatesAndExecutesWorkflowDAG() async throws {
+        let registry = ToolRegistry()
+        await registry.register(SeedTool())
+        await registry.register(JoinTool())
+        let descriptors = await registry.registeredDescriptors()
+        let spec = WorkflowSpec(
+            workflowID: "wf_join",
+            intent: "Join two values.",
+            nodes: [
+                WorkflowNode(
+                    id: "left",
+                    tool: "seed",
+                    input: .object(["value": .string("a")])
+                ),
+                WorkflowNode(
+                    id: "right",
+                    tool: "seed",
+                    input: .object(["value": .string("b")])
+                ),
+                WorkflowNode(
+                    id: "join_values",
+                    tool: "join",
+                    input: .object([
+                        "left": .object(["$ref": .object([
+                            "source": .string("node"),
+                            "node": .string("left"),
+                            "path": .string("/value"),
+                        ])]),
+                        "right": .object(["$ref": .object([
+                            "source": .string("node"),
+                            "node": .string("right"),
+                            "path": .string("/value"),
+                        ])]),
+                    ])
+                ),
+            ],
+            final: .nodeOutput("join_values", path: "/combined"),
+            limits: WorkflowLimits(maxNodes: 5, maxParallelism: 2)
+        )
+
+        let validated = try WorkflowValidator.validate(
+            spec,
+            policy: WorkflowValidationPolicy(descriptors: descriptors)
+        )
+        #expect(validated.levels.map { $0.map(\.id).sorted() } == [
+            ["left", "right"], ["join_values"],
+        ])
+
+        let result = try await WorkflowExecutor(registry: registry)
+            .execute(validated)
+        #expect(result.finalText == "a-b")
+        #expect(result.finalValue == .string("a-b"))
+        #expect(result.nodeOutputs.keys.sorted() == ["join_values", "left", "right"])
+    }
+
+    @Test func rejectsForwardReferences() throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_bad",
+            intent: "Bad order.",
+            nodes: [
+                WorkflowNode(
+                    id: "join_values",
+                    tool: "join",
+                    input: .object([
+                        "left": .object(["$ref": .object([
+                            "source": .string("node"),
+                            "node": .string("left"),
+                            "path": .string("/value"),
+                        ])]),
+                    ])
+                ),
+                WorkflowNode(
+                    id: "left",
+                    tool: "seed",
+                    input: .object(["value": .string("a")])
+                ),
+            ],
+            final: .nodeOutput("join_values")
+        )
+        #expect(throws: WorkflowError.self) {
+            _ = try WorkflowValidator.validate(
+                spec,
+                policy: WorkflowValidationPolicy(
+                    availableTools: ["seed", "join"]
+                )
+            )
+        }
     }
 }
 

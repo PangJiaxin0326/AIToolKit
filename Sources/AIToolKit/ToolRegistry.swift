@@ -55,6 +55,14 @@ public actor ToolRegistry {
         entries.values.map(\.descriptor).sorted { $0.name < $1.name }
     }
 
+    public func descriptor(for name: String) -> ToolDescriptor? {
+        entries[name]?.descriptor
+    }
+
+    public func contains(name: String) -> Bool {
+        entries[name] != nil
+    }
+
     /// Returns the schema bundle for the given subset (used by PromptBuilder).
     /// An empty `names` set returns no tools.
     public func manifest(for names: Set<String>) -> [ToolDescriptor] {
@@ -71,5 +79,19 @@ public actor ToolRegistry {
             throw ToolRegistryError.notRegistered(name)
         }
         return try await entry.call(jsonInput, context)
+    }
+
+    public func call(
+        _ call: ToolCall,
+        context: ToolContext
+    ) async throws -> JSONValue {
+        let data = try call.input.data()
+        let output = try await self.call(
+            name: call.name,
+            jsonInput: data,
+            context: context
+        )
+        return (try? JSONValue(data: output))
+            ?? .string(String(decoding: output, as: UTF8.self))
     }
 }
