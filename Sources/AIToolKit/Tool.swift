@@ -1,29 +1,40 @@
 import Foundation
 import OSLog
 
-/// A typed, declarative unit of work the LLM can invoke.
+/// A typed, declarative unit of work the LLM can call.
 ///
 /// AIToolKit defines the standard so any Swift package can ship `Tool`s
 /// without depending on the rest of AIKit. The hosting app wires them into an
 /// `AIKitCapability.ToolRegistry` and runs them through `AIKitRuntime`.
+///
+/// The interface follows Claude SDK / MCP naming: tools expose an
+/// `inputSchema` and are executed with `call(_:in:)`.
 public protocol Tool: Sendable {
     associatedtype Input: Codable & Sendable
     associatedtype Output: Codable & Sendable
 
     static var name: String { get }
     static var description: String { get }
-    static var schema: ToolSchema { get }
+    static var inputSchema: ToolSchema { get }
 
-    func invoke(_ input: Input, in context: ToolContext) async throws -> Output
+    func call(_ input: Input, in context: ToolContext) async throws -> Output
 }
 
 extension Tool {
+    /// Callable shorthand for direct use outside a registry.
+    public func callAsFunction(
+        _ input: Input,
+        in context: ToolContext = ToolContext()
+    ) async throws -> Output {
+        try await call(input, in: context)
+    }
+
     /// The provider-facing descriptor derived from the tool's static metadata.
     public static var descriptor: ToolDescriptor {
         ToolDescriptor(
             name: name,
             description: description,
-            inputSchema: schema.json
+            inputSchema: inputSchema.json
         )
     }
 }
@@ -75,7 +86,7 @@ public struct GenericToolError: ToolError {
     }
 }
 
-/// A parsed request from the model to invoke a tool.
+/// A parsed request from the model to call a tool.
 public struct ToolCall: Sendable, Hashable, Codable {
     public var id: String?
     public var name: String

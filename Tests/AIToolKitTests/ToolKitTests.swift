@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import AIToolKit
 
@@ -8,23 +9,55 @@ private struct EchoTool: Tool {
 
     static let name = "echo"
     static let description = "Echoes input back."
-    static let schema = ToolSchema.object(
+    static let inputSchema = ToolSchema.object(
         properties: ["text": .string(description: "anything")],
         required: ["text"]
     )
 
-    func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
         Output(echoed: "\(context.viewID):\(input.text)")
     }
 }
 
+private struct UppercaseTool: Tool {
+    struct Input: Codable, Sendable { var text: String }
+    struct Output: Codable, Sendable { var uppercased: String }
+
+    static let name = "uppercase"
+    static let description = "Uppercases input text."
+    static let inputSchema = ToolSchema.object(
+        properties: ["text": .string(description: "text to uppercase")],
+        required: ["text"]
+    )
+
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+        Output(uppercased: input.text.uppercased() + (context.metadata["suffix"] ?? ""))
+    }
+}
+
+private struct LabelViewTool: ViewTool {
+    struct Input: Codable, Sendable { var title: String }
+
+    static let name = "label"
+    static let description = "Builds a label view."
+    static let inputSchema = ToolSchema.object(
+        properties: ["title": .string(description: "label title")],
+        required: ["title"]
+    )
+
+    @MainActor
+    func call(_ input: Input, in context: ToolContext) async throws -> Text {
+        Text("\(context.viewID):\(input.title)")
+    }
+}
+
 @Suite struct ToolKitRegistryTests {
-    @Test func registerAndInvoke() async throws {
+    @Test func registerAndCall() async throws {
         let registry = ToolRegistry()
         await registry.register(EchoTool())
         let context = ToolContext(viewID: "home")
         let input = try JSONEncoder().encode(EchoTool.Input(text: "hi"))
-        let outData = try await registry.invoke(
+        let outData = try await registry.call(
             name: "echo", jsonInput: input, context: context
         )
         let output = try JSONDecoder().decode(EchoTool.Output.self, from: outData)
@@ -43,7 +76,7 @@ private struct EchoTool: Tool {
     @Test func unknownToolThrows() async {
         let registry = ToolRegistry()
         await #expect(throws: ToolRegistryError.self) {
-            try await registry.invoke(
+            try await registry.call(
                 name: "nope",
                 jsonInput: Data("{}".utf8),
                 context: ToolContext(viewID: "v")
@@ -55,7 +88,34 @@ private struct EchoTool: Tool {
         let descriptor = EchoTool.descriptor
         #expect(descriptor.name == EchoTool.name)
         #expect(descriptor.description == EchoTool.description)
-        #expect(descriptor.inputSchema == EchoTool.schema.json)
+        #expect(descriptor.inputSchema == EchoTool.inputSchema.json)
+    }
+
+    @Test func toolCanUseCallAsFunction() async throws {
+        let output = try await EchoTool().callAsFunction(
+            EchoTool.Input(text: "hi"),
+            in: ToolContext(viewID: "home")
+        )
+        #expect(output.echoed == "home:hi")
+    }
+
+    @Test func toolRegistersAndUsesCallAsFunction() async throws {
+        let registry = ToolRegistry()
+        await registry.register(UppercaseTool())
+        let input = try JSONEncoder().encode(UppercaseTool.Input(text: "hi"))
+        let outData = try await registry.call(
+            name: "uppercase",
+            jsonInput: input,
+            context: ToolContext(metadata: ["suffix": "!"])
+        )
+        let output = try JSONDecoder().decode(UppercaseTool.Output.self, from: outData)
+        #expect(output.uppercased == "HI!")
+
+        let callableOutput = try await UppercaseTool().callAsFunction(
+            UppercaseTool.Input(text: "go"),
+            in: ToolContext(metadata: ["suffix": "."])
+        )
+        #expect(callableOutput.uppercased == "GO.")
     }
 
     @Test func toolSchemaObjectHasRequiredFields() {
@@ -69,6 +129,30 @@ private struct EchoTool: Tool {
         }
         #expect(fields["type"] == .string("object"))
         #expect(fields["required"] == .array([.string("a")]))
+    }
+}
+
+@MainActor
+@Suite struct ViewToolTests {
+    @Test func viewToolRegistryCallsTool() async throws {
+        let registry = ViewToolRegistry()
+        registry.register(LabelViewTool())
+        let input = try JSONEncoder().encode(LabelViewTool.Input(title: "Hello"))
+        let view = try await registry.call(
+            name: "label",
+            jsonInput: input,
+            context: ToolContext(viewID: "view")
+        )
+        _ = view
+    }
+
+    @Test func viewToolCanUseCallAsFunction() async throws {
+        let tool = LabelViewTool()
+        let callableView = try await tool.callAsFunction(
+            LabelViewTool.Input(title: "World"),
+            in: ToolContext(viewID: "view")
+        )
+        _ = callableView
     }
 }
 

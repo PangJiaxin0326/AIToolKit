@@ -8,7 +8,7 @@ public actor ToolRegistry {
 
     private struct Entry {
         let descriptor: ToolDescriptor
-        let invoke: @Sendable (Data, ToolContext) async throws -> Data
+        let call: @Sendable (Data, ToolContext) async throws -> Data
     }
 
     private var entries: [String: Entry] = [:]
@@ -30,7 +30,7 @@ public actor ToolRegistry {
                     detail: String(describing: error)
                 )
             }
-            let output = try await tool.invoke(input, in: context)
+            let output = try await tool.call(input, in: context)
             do {
                 return try encoder.encode(output)
             } catch {
@@ -61,8 +61,8 @@ public actor ToolRegistry {
         names.compactMap { entries[$0]?.descriptor }.sorted { $0.name < $1.name }
     }
 
-    /// Dispatches an invocation by name; decodes input, encodes output.
-    public func invoke(
+    /// Dispatches a call by name; decodes input, encodes output.
+    public func call(
         name: String,
         jsonInput: Data,
         context: ToolContext
@@ -70,6 +70,6 @@ public actor ToolRegistry {
         guard let entry = entries[name] else {
             throw ToolRegistryError.notRegistered(name)
         }
-        return try await entry.invoke(jsonInput, context)
+        return try await entry.call(jsonInput, context)
     }
 }

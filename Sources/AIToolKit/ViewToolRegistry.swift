@@ -14,7 +14,7 @@ public final class ViewToolRegistry {
 
     private struct Entry {
         let descriptor: ToolDescriptor
-        let make: (Data, ToolContext) async throws -> AnyView
+        let call: (Data, ToolContext) async throws -> AnyView
     }
 
     private var entries: [String: Entry] = [:]
@@ -35,7 +35,7 @@ public final class ViewToolRegistry {
                     detail: String(describing: error)
                 )
             }
-            let view = try await tool.makeView(input, in: context)
+            let view = try await tool.call(input, in: context)
             return AnyView(view)
         }
     }
@@ -58,9 +58,9 @@ public final class ViewToolRegistry {
         names.compactMap { entries[$0]?.descriptor }.sorted { $0.name < $1.name }
     }
 
-    /// Dispatch an invocation by name; decode the JSON input, run the tool,
+    /// Dispatch a call by name; decode the JSON input, run the tool,
     /// erase the resulting view to `AnyView`.
-    public func makeView(
+    public func call(
         name: String,
         jsonInput: Data,
         context: ToolContext
@@ -68,6 +68,6 @@ public final class ViewToolRegistry {
         guard let entry = entries[name] else {
             throw ToolRegistryError.notRegistered(name)
         }
-        return try await entry.make(jsonInput, context)
+        return try await entry.call(jsonInput, context)
     }
 }

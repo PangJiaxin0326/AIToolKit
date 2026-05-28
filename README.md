@@ -2,7 +2,7 @@
 
 The tool-calling standard for Swift LLM apps. AIToolKit defines a typed,
 declarative `Tool` protocol and a process-wide `ToolRegistry` so any Swift
-package can ship tools an LLM can invoke — without depending on a particular
+package can ship tools an LLM can call — without depending on a particular
 runtime or provider.
 
 It has no third-party dependencies, is fully `Sendable`, and builds under
@@ -50,12 +50,12 @@ struct EchoTool: Tool {
 
     static let name = "echo"
     static let description = "Echoes input back."
-    static let schema = ToolSchema.object(
+    static let inputSchema = ToolSchema.object(
         properties: ["text": .string(description: "anything")],
         required: ["text"]
     )
 
-    func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
         Output(echoed: input.text)
     }
 }
@@ -63,3 +63,5 @@ struct EchoTool: Tool {
 let registry = ToolRegistry()
 await registry.register(EchoTool())
 ```
+
+Tools can also be called directly with `try await tool(input, in: context)`.
