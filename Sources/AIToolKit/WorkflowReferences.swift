@@ -136,7 +136,11 @@ public enum WorkflowReferenceResolver {
         currentNodeID: String,
         display: String
     ) throws -> JSONValue {
-        if pointer.isEmpty { return value }
+        // Models frequently emit "/" to mean "the root", which is technically
+        // not RFC 6901 ("/" is the empty-string-keyed property of the root).
+        // Treat it as an alias for "" — the alternative is a hard failure on
+        // an LLM convention that's effectively impossible to coach away.
+        if pointer.isEmpty || pointer == "/" { return value }
         guard pointer.hasPrefix("/") else {
             throw WorkflowError.invalidReference(
                 nodeID: currentNodeID,

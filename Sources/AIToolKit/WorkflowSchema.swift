@@ -1,7 +1,10 @@
 import Foundation
 
 public enum WorkflowSchema {
-    public static func descriptor(availableTools: [ToolDescriptor]) -> ToolDescriptor {
+    public static func descriptor(
+        availableTools: [ToolDescriptor],
+        minimal: Bool = false
+    ) -> ToolDescriptor {
         ToolDescriptor(
             name: WorkflowSpec.toolName,
             description: """
@@ -10,7 +13,9 @@ public enum WorkflowSchema {
             inputs that depend on earlier tool outputs. The app executes the \
             workflow DAG locally and does not call the model again.
             """,
-            inputSchema: specSchema(availableTools: availableTools).json,
+            inputSchema: (minimal
+                ? minimalSpecSchema(availableTools: availableTools)
+                : specSchema(availableTools: availableTools)).json,
             outputSchema: ToolSchema.unknownObject.json,
             annotations: ToolAnnotations(
                 isReadOnly: false,
@@ -98,10 +103,60 @@ public enum WorkflowSchema {
             required: ["schema_version", "workflow_id", "intent", "mode", "nodes", "final", "limits", "metadata"]
         )
     }
+
+    /// Minimal output-token schema for `response_format`. Constrains the model
+    /// to emit ONLY `{schema_version, nodes:[{id, tool, input}]}` — no policy,
+    /// output_policy, limits, final, metadata, intent, mode, workflow_id, or
+    /// even depends_on. The runtime fills every omitted field with a default
+    /// (see `WorkflowSpec.init(from:)`), and node dependencies are derived
+    /// from `$ref`s in `input` (see `WorkflowValidator`). Pairs with a minimal
+    /// worked example so the generated DAG is as compact as the task allows.
+    public static func minimalSpecSchema(availableTools: [ToolDescriptor]) -> ToolSchema {
+        let toolNames = availableTools.map(\.name).sorted()
+        let node = ToolSchema.strictObject(
+            properties: [
+                "id": .string(description: "Unique snake_case node id."),
+                "tool": .stringEnum(toolNames),
+                "input": .unknownObject,
+            ],
+            required: ["id", "tool", "input"]
+        )
+        return .strictObject(
+            properties: [
+                "schema_version": .constant(.string(WorkflowSpec.schemaVersion)),
+                "nodes": .array(of: node, minItems: 1, maxItems: 24),
+            ],
+            required: ["schema_version", "nodes"]
+        )
+    }
 }
 
 public enum WorkflowPromptBuilder {
-    public static func planningInstruction(toolManifest: [ToolDescriptor]) -> String {
+    /// One fixed, general, lean worked example. Measured to be **load-bearing**:
+    /// the schema fixes *structure*, but the example supplies *semantics* (which
+    /// tools, how to wire `$ref`, that a plan ends in an action) — without it
+    /// even a strong model emits structurally-valid-but-empty plans, and a
+    /// strict `response_format` cannot substitute for it. Use the SAME example
+    /// every request; do not tailor it per task. The names are illustrative —
+    /// the model adapts them to the actual manifest.
+    public static func workedExample() -> String {
+        """
+        Example WorkflowSpec (general template — adapt the tools/values to the \
+        actual request; never copy these literal values):
+        {"schema_version":"\(WorkflowSpec.schemaVersion)","nodes":[\
+        {"id":"find_bob","tool":"find_contact","input":{"query":"Bob Singh"}},\
+        {"id":"send","tool":"send_message","input":{"contactID":{"$ref":{"source":"node","node":"find_bob","path":"/contactID"}},"body":"Hi Bob."}}\
+        ]}
+        """
+    }
+
+    /// - Parameter includeExample: append the load-bearing `workedExample()`.
+    ///   Recommended (and the default) for the lean `minimal` path.
+    public static func planningInstruction(
+        toolManifest: [ToolDescriptor],
+        minimal: Bool = false,
+        includeExample: Bool = false
+    ) -> String {
         let tools = toolManifest
             .map { descriptor in
                 var line = "- \(descriptor.name): \(descriptor.description)"
@@ -123,6 +178,29 @@ public enum WorkflowPromptBuilder {
                 return line
             }
             .joined(separator: "\n")
+        if minimal {
+            let example = includeExample ? "\n\n" + workedExample() : ""
+            return """
+            For requests requiring tools, call the synthetic \
+            \(WorkflowSpec.toolName) tool with one WorkflowSpec object. Do not \
+            emit separate tool calls.
+
+            WorkflowSpec is a topological DAG. Emit only \
+            schema_version "\(WorkflowSpec.schemaVersion)" and a `nodes` array. \
+            Each node has exactly three fields: id, tool, input — omit \
+            everything else (no kind, depends_on, policy, output_policy, \
+            limits, final, intent, metadata). `input` holds ONLY that tool's own \
+            parameters — never put id, tool, or depends_on inside input. Put \
+            independent source nodes first; a node depends on another only by \
+            referencing its output in `input` with {"$ref":{"source":"node",\
+            "node":"node_id","path":"/field"}} (JSON Pointer). Do not copy \
+            intermediate outputs; reference them. The app fills all omitted \
+            fields and executes the DAG locally.
+
+            Available workflow node tools:
+            \(tools)\(example)
+            """
+        }
         return """
         For requests requiring tools, emit one WorkflowSpec JSON object, a \
         fenced `workflow` block containing that object, or call the synthetic \

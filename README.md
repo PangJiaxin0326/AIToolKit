@@ -65,3 +65,42 @@ await registry.register(EchoTool())
 ```
 
 Tools can also be called directly with `try await tool(input, in: context)`.
+
+## Workflows (one-shot DAG) and two-round-trip
+
+AIToolKit also ships a one-shot **workflow** layer — the model emits one
+`WorkflowSpec` (a DAG of tool calls wired by `$ref` JSON Pointers) and the device
+validates and executes it locally without re-calling the model:
+
+- `WorkflowSpec` / `WorkflowNode` — the lean IR (`{id, tool, input}` per node;
+  every other field defaults).
+- `WorkflowValidator` — graph shape, tool availability, schema, and limit checks.
+- `WorkflowExecutor` — topological, parallel-where-safe execution via `ToolRegistry`.
+- `WorkflowReferenceResolver` — resolves `$ref`/`$literal` values (node, context, user_input).
+- `WorkflowSchema` / `WorkflowPromptBuilder` — strict schemas + planning prompts.
+
+For tasks whose parameters depend on local/private state, a **two-round-trip**
+layer (Plan → local context harvest → Bind) builds on the same executor:
+
+- `WorkflowPlan` / `WorkflowBinding` / `WorkflowPlanNode` — the Round-1/Round-2
+  wire models; `TwoRoundValue` — the `$slot`/`$bind`/`{{label}}` value algebra.
+- `WorkflowTwoRoundCompiler` — pure validate / auto-bind / resolve-binding /
+  lower-to-`WorkflowSpec` logic (no LLM).
+- `ContextHarvesting` — the deterministic local context-harvest protocol;
+  `ContextPacket` / `HarvestedCandidate` — its output.
+- `WorkflowTwoRoundSchema` / `WorkflowTwoRoundPrompt` — strict schemas + the
+  versioned planner/binder instructions.
+- `WorkflowPlanCache` — caches the Round-1 plan so a repeated intent skips the
+  planner call.
+
+The runtime driver that issues the two LLM calls is `WorkflowTwoRoundRunner`
+(in AIKit's `AIKitRuntime`).
+
+See:
+
+- **[WORKFLOW_GUIDANCE.md](WORKFLOW_GUIDANCE.md)** — when to use sequential vs
+  workflow vs two-round-trip, the cost/reliability scaling laws, schema design,
+  and pitfalls.
+- **[WORKFLOW_HOWTO.md](WORKFLOW_HOWTO.md)** — step-by-step: the node value
+  algebra, the one-shot pipeline, authoring tools well, the two-round-trip layer,
+  auto-bind, and recipes.

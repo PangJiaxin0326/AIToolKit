@@ -79,7 +79,8 @@ public enum JSONSchemaValidator {
         _ pointer: String,
         in schema: JSONValue
     ) -> Bool? {
-        if pointer.isEmpty { return true }
+        // Accept the LLM-flavored "/" as root, matching `resolvePointer`.
+        if pointer.isEmpty || pointer == "/" { return true }
         guard pointer.hasPrefix("/") else { return false }
         var current = schema
         for raw in pointer.dropFirst().split(separator: "/", omittingEmptySubsequences: false) {

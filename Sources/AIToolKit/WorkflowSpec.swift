@@ -42,6 +42,31 @@ public struct WorkflowSpec: Sendable, Codable, Hashable {
         case intent, mode, nodes, final, limits, metadata
     }
 
+    /// Lenient decoder: only `nodes` is required. Every other field falls back
+    /// to a sane default so a model can emit a *minimal* spec (just the node
+    /// list) and the runtime fills the rest. This is what lets the lean schema
+    /// / minimal example cut output tokens — the synthesized decoder would
+    /// otherwise demand every field. Full specs still decode unchanged.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? Self.schemaVersion
+        self.workflowID = try c.decodeIfPresent(String.self, forKey: .workflowID) ?? "wf"
+        self.intent = try c.decodeIfPresent(String.self, forKey: .intent) ?? ""
+        self.mode = try c.decodeIfPresent(WorkflowMode.self, forKey: .mode) ?? .execute
+        self.nodes = try c.decodeIfPresent([WorkflowNode].self, forKey: .nodes) ?? []
+        self.limits = try c.decodeIfPresent(WorkflowLimits.self, forKey: .limits) ?? .default
+        self.metadata = try c.decodeIfPresent([String: JSONValue].self, forKey: .metadata) ?? [:]
+        // `final` defaults to the last node's output (or an empty message for
+        // an empty plan) so a spec that omits it still validates and renders.
+        if let f = try c.decodeIfPresent(WorkflowFinal.self, forKey: .final) {
+            self.final = f
+        } else if let last = self.nodes.last {
+            self.final = .nodeOutput(last.id)
+        } else {
+            self.final = .message("")
+        }
+    }
+
     public static func decodeToolCallInput(_ input: JSONValue) throws -> WorkflowSpec {
         let value: JSONValue
         if case .object(let object) = input,
@@ -98,6 +123,46 @@ public struct WorkflowNode: Sendable, Codable, Hashable, Identifiable {
         case input, policy
         case outputPolicy = "output_policy"
     }
+
+    /// Lenient decoder: only `id` is required. `tool` may be absent (validated
+    /// later), `depends_on` defaults to [] (dependencies are also derived from
+    /// `$ref`s in `input`), and `policy`/`output_policy` default — so a node
+    /// can be just `{id, tool, input}`.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.kind = try c.decodeIfPresent(WorkflowNodeKind.self, forKey: .kind) ?? .tool
+        self.tool = try c.decodeIfPresent(String.self, forKey: .tool)
+        self.dependsOn = try c.decodeIfPresent([String].self, forKey: .dependsOn) ?? []
+        let rawInput = try c.decodeIfPresent(JSONValue.self, forKey: .input) ?? .object([:])
+        self.input = Self.sanitizedInput(rawInput)
+        self.policy = try c.decodeIfPresent(WorkflowNodePolicy.self, forKey: .policy) ?? .default
+        self.outputPolicy = try c.decodeIfPresent(WorkflowOutputPolicy.self, forKey: .outputPolicy) ?? .default
+    }
+
+    /// Node-level field names a model must NOT place inside `input` — but
+    /// smaller planners routinely do (e.g. echoing `"id"`/`"tool"` into a
+    /// node's `input`). Left there, those stray keys make the per-node input
+    /// fail the tool's strict input-schema validation at execution time, so
+    /// the node — and the whole workflow side effect — silently fails.
+    private static let reservedInputKeys: Set<String> = [
+        "id", "kind", "tool", "depends_on", "policy", "output_policy",
+    ]
+
+    /// Defensive input normalization applied at decode time:
+    /// - a `null` (or non-object) input becomes an empty object, so a
+    ///   model that emits `"input": null` doesn't crash the node; and
+    /// - any node-structural keys that leaked into `input` are stripped, so
+    ///   the tool sees only its own parameters.
+    /// Tool parameters in practice never use these structural names, so this
+    /// is safe and turns a common malformed-plan failure into a success.
+    private static func sanitizedInput(_ value: JSONValue) -> JSONValue {
+        guard case .object(var object) = value else {
+            return .object([:])
+        }
+        for key in reservedInputKeys { object.removeValue(forKey: key) }
+        return .object(object)
+    }
 }
 
 public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
@@ -133,6 +198,14 @@ public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
         case onError = "on_error"
         case defaultOutput = "default_output"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.timeoutMS = try c.decodeIfPresent(Int.self, forKey: .timeoutMS) ?? 5_000
+        self.retry = try c.decodeIfPresent(WorkflowRetryPolicy.self, forKey: .retry) ?? .default
+        self.onError = try c.decodeIfPresent(OnError.self, forKey: .onError) ?? .abort
+        self.defaultOutput = try c.decodeIfPresent(JSONValue.self, forKey: .defaultOutput)
+    }
 }
 
 public struct WorkflowRetryPolicy: Sendable, Codable, Hashable {
@@ -156,6 +229,13 @@ public struct WorkflowRetryPolicy: Sendable, Codable, Hashable {
         case maxAttempts = "max_attempts"
         case backoffMS = "backoff_ms"
         case retryOnlyIfToolErrorIsRetriable = "retry_only_if_tool_error_is_retriable"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.maxAttempts = try c.decodeIfPresent(Int.self, forKey: .maxAttempts) ?? 1
+        self.backoffMS = try c.decodeIfPresent(Int.self, forKey: .backoffMS) ?? 0
+        self.retryOnlyIfToolErrorIsRetriable = try c.decodeIfPresent(Bool.self, forKey: .retryOnlyIfToolErrorIsRetriable) ?? true
     }
 }
 
@@ -190,6 +270,14 @@ public struct WorkflowOutputPolicy: Sendable, Codable, Hashable {
         case maxBytes = "max_bytes"
         case redaction
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.store = try c.decodeIfPresent(Bool.self, forKey: .store) ?? true
+        self.exposeToFinal = try c.decodeIfPresent(Bool.self, forKey: .exposeToFinal) ?? true
+        self.maxBytes = try c.decodeIfPresent(Int.self, forKey: .maxBytes) ?? 65_536
+        self.redaction = try c.decodeIfPresent(Redaction.self, forKey: .redaction) ?? .toolDefault
+    }
 }
 
 public struct WorkflowLimits: Sendable, Codable, Hashable {
@@ -217,6 +305,14 @@ public struct WorkflowLimits: Sendable, Codable, Hashable {
         case maxParallelism = "max_parallelism"
         case deadlineMS = "deadline_ms"
         case maxOutputBytesPerNode = "max_output_bytes_per_node"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.maxNodes = try c.decodeIfPresent(Int.self, forKey: .maxNodes) ?? 12
+        self.maxParallelism = try c.decodeIfPresent(Int.self, forKey: .maxParallelism) ?? 4
+        self.deadlineMS = try c.decodeIfPresent(Int.self, forKey: .deadlineMS) ?? 15_000
+        self.maxOutputBytesPerNode = try c.decodeIfPresent(Int.self, forKey: .maxOutputBytesPerNode) ?? 65_536
     }
 }
 
@@ -260,6 +356,21 @@ public struct WorkflowFinal: Sendable, Codable, Hashable {
 
     public static func message(_ text: String) -> WorkflowFinal {
         WorkflowFinal(kind: .message, message: text)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, value, template, bindings, node, path, message
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.kind = try c.decodeIfPresent(Kind.self, forKey: .kind) ?? .message
+        self.value = try c.decodeIfPresent(JSONValue.self, forKey: .value)
+        self.template = try c.decodeIfPresent(String.self, forKey: .template)
+        self.bindings = try c.decodeIfPresent([String: JSONValue].self, forKey: .bindings) ?? [:]
+        self.node = try c.decodeIfPresent(String.self, forKey: .node)
+        self.path = try c.decodeIfPresent(String.self, forKey: .path)
+        self.message = try c.decodeIfPresent(String.self, forKey: .message)
     }
 }
 

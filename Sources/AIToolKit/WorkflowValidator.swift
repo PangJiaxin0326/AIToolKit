@@ -71,22 +71,25 @@ public enum WorkflowValidator {
         _ spec: WorkflowSpec,
         policy: WorkflowValidationPolicy
     ) throws -> ValidatedWorkflow {
+        var spec = spec
         guard spec.schemaVersion == WorkflowSpec.schemaVersion else {
             throw WorkflowError.unsupportedSchemaVersion(spec.schemaVersion)
         }
         guard isValidWorkflowID(spec.workflowID) else {
             throw WorkflowError.invalidWorkflowID(spec.workflowID)
         }
-        guard spec.limits.maxNodes > 0 else {
+        // The model's self-declared `limits.max_nodes` is advisory, not a
+        // safety bound. Small models routinely low-ball it — emitting
+        // `max_nodes: 1` for a two-node plan — which under a `min(spec, policy)`
+        // rule would reject their own otherwise-valid workflow. The host's
+        // `policy.maxNodes` is the real ceiling; normalize the declared limit
+        // up to at least the node count so a self-contradictory value can't
+        // fail validation.
+        spec.limits.maxNodes = max(spec.limits.maxNodes, spec.nodes.count)
+        guard spec.nodes.count <= policy.maxNodes else {
             throw WorkflowError.nodeLimitExceeded(
                 count: spec.nodes.count,
-                limit: spec.limits.maxNodes
-            )
-        }
-        guard spec.nodes.count <= min(spec.limits.maxNodes, policy.maxNodes) else {
-            throw WorkflowError.nodeLimitExceeded(
-                count: spec.nodes.count,
-                limit: min(spec.limits.maxNodes, policy.maxNodes)
+                limit: policy.maxNodes
             )
         }
         guard spec.limits.maxParallelism > 0,
