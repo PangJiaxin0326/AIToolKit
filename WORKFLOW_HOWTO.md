@@ -30,6 +30,11 @@ Every node `input` value is one of:
 *before* building the final `WorkflowSpec`, so the validator/executor run
 unchanged.
 
+> **Weak-model gotcha:** the 3-level nested `$ref` object is the #1 malformed-JSON
+> trigger on a small planner — it mis-balances the braces (nests a sibling key
+> inside the ref, drops a `}`). On a weak/mid planner constrain the planner with
+> `response_format` (§4.5); a flat one-level `$ref` alias is the deeper fix (§9).
+
 ---
 
 ## 2. One-shot workflow
@@ -220,6 +225,17 @@ refusal as **success** for "should-not-act" situations.
 
 - One bounded **retry** on a transient (network error or no-JSON response): each
   round is a stateless request, so re-issuing it once is faithful (not chaining).
+  Note the retry *masks* malformed JSON in the success rate but not in cost —
+  measure the raw per-call malformed rate, not just terminal failures.
+- **On a weak/mid planner, set `useStructuredOutput` for the planner round.** Pass
+  `WorkflowTwoRoundSchema.planner(toolNames:sources:)` as the `response_format`;
+  the strict schema makes the nested-`$ref` malformed shape (§1) unrepresentable.
+  Measured: planner-round unparseable JSON **49%→~0%** on a small model (96%→0% at
+  the deepest level), success **~39%→71%** (mid ~79%→95%), token-neutral (input
+  schema only, and it removes the malformed retries). A strong planner doesn't
+  need it (already 0% malformed). Keep each interactive tool's required keys
+  **required** in that schema (§2.3) so missing-`body`/`contactID` can't slip
+  through.
 - **Prune stray `input` keys** to the tool schema before execution (the binder
   leaks keys too).
 
@@ -247,6 +263,24 @@ substitutes the chosen candidate's label (stripped of any provenance hint) — o
 both the auto-bind and binder paths. Bind ids with `$bind`/`$slot`; never paste a
 raw id into prose.
 
+**Negative rule (load-bearing on a strong planner).** Tell the planner that
+`{{ }}` wraps ONLY a declared slot_id — never a `$ref`, node id, or expression (a
+`$ref` replaces the *whole* field; it cannot be embedded in a sentence), and that
+text already in the request should be written **literally**, not referenced.
+Without it, a capable model writes the correct literal *and then* appends
+`"… {{$ref:{source:node,node:find_doc,path:/hits/0/title}}}"` for the exact stored
+title, which the validator rejects as an undeclared slot. The exact clause:
+
+> `{{ }}` wraps ONLY a slot_id you declared — never a `$ref`, a node id, or any
+> expression. A `$ref` replaces the WHOLE field value; it cannot be embedded in a
+> sentence. If the text is already in the user's request (a named document or
+> person), just write it literally; do not reference a tool's output inside
+> body/subject text.
+
+Measured: `{{$ref}}` misuse 12/20→0/20, success **80%→98%** on "mention X in the
+body/subject" tasks, tokens flat. It is a *prompt* fix — adding another example
+does **not** stop the misuse (the model is over-generalizing the existing one).
+
 ---
 
 ## 7. Recommended recipes
@@ -257,10 +291,19 @@ WORKFLOW:    lean schema (id/tool/input only) + one fixed example
              + perTask manifest + mem 0 + thinking off + temperature 0.2
              (response_format optional; add it for fan-out structural guarantees)
 
-# Capable cloud model, deictic / local-context tasks — safe superset default:
+# Strong cloud model, deictic / local-context tasks — safe superset default:
 TWO-ROUND:   lean planner+binder schemas + two-slot worked example + {{slot}} tokens
-             + auto-bind ON + freeform (NOT response_format) + temperature 0.2
+             + the "{{ }} wraps only a slot_id; write known text literally" clause (§6)
+             + auto-bind ON + freeform + temperature 0.2
              (self-contained asks shortcut to one call automatically)
+
+# Mid / small planner still doing two-round — ADD structured output on the planner:
+TWO-ROUND+:  same as above, but response_format = WorkflowTwoRoundSchema.planner(...)
+             (useStructuredOutput) — removes the nested-$ref malformed JSON
+             (96%→0% at the deepest level on a small model; success ~39%→71%,
+             mid ~79%→95%), token-neutral. Keep interactive tools' required keys
+             required so the schema enforces them. A strong planner needs neither.
+             (But if the model can barely author a DAG at all, prefer SEQUENTIAL.)
 
 # Small / local / weak planner (can't author a DAG):
 SEQUENTIAL:  minimal prompt + perTask manifest + mem 0 + temperature 0.2
@@ -317,3 +360,19 @@ by the runtime, **never** as model-generated code. This keeps multi-step
 composition on **one** round trip (closing the transform gap without helper tools
 or a second call) while staying safe and inspectable. Keep the set small and
 declarative; do not admit arbitrary expressions.
+
+### 9.1 A flatter `$ref` (robustness, not expressiveness)
+
+A second, orthogonal v1.x change targets the weak-model malformed-JSON failure at
+its source. The canonical 3-level
+`{"$ref":{"source":"node","node":"X","path":"/p"}}` is the dominant malformed-JSON
+trigger on a small planner — **100%** of a small model's malformed plans are brace
+imbalances around it, and the rate scales with ref count (~25%→54%→96% as refs go
+1→3). A **one-level alias** decoded leniently alongside the canonical form —
+`{"$ref":"X/p"}` (node output) and `{"$ref":"@/p"}` (context) — would have far
+fewer braces to balance, removing the failure for free *and* shaving output
+tokens, so even *freeform* stays robust on a small model. Implementation: accept
+both shapes in `TwoRoundValue`/`WorkflowNode` decoding (normalize the flat form to
+the canonical one), and emit the flat form in the planner prompt + examples.
+`response_format` (§4.5) is the ship-now mitigation; the flat `$ref` is the
+structural fix that also helps freeform.

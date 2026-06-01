@@ -5,7 +5,8 @@ and seconds for the highest success rate. This is the *why* and *when*; see
 [`WORKFLOW_HOWTO.md`](WORKFLOW_HOWTO.md) for the *how* (step-by-step, schemas,
 code). The numbers come from a controlled comparison across a graded task ladder,
 a deictic/local-context suite, and a synthetic dependency-depth sweep on two
-cloud models; cited as "measured" below.
+cloud models — plus a three-tier model-strength sweep (strong / mid / small) for
+the malformed-JSON and structured-output findings; cited as "measured" below.
 
 ---
 
@@ -97,6 +98,13 @@ Output tokens are set by the **schema** and the **DAG shape**, nothing else.
   `WorkflowSpec` decoders already do this — only `nodes` is required, and a node
   needs only `id`. Measured: lean schema ≈ **−70% output tokens, −52% total,
   −64% latency** at no reliability cost vs the full envelope.
+  **Caveat (weak models): lean the *envelope*, not an interactive tool's own
+  required parameters.** If `input` is left a free-form object, a small model
+  omits a required field (`send_message` without `body`, `create_email_draft`
+  without `recipientContactID`) and the node fails strict input-validation
+  *silently* at execution — the dominant residual failure on a small/mid planner
+  once malformed JSON is removed. Keep each interactive tool's required keys
+  required in the planner schema so `response_format` can enforce them.
 - **Dependencies come from `$ref`, not `depends_on`.** A node depends on another
   *only* by referencing its output:
   `{"$ref":{"source":"node","node":"<id>","path":"/field"}}` (JSON Pointer; `""`
@@ -111,12 +119,26 @@ Output tokens are set by the **schema** and the **DAG shape**, nothing else.
   `$ref`, that a plan ends in an action). Without it even a strong model emits
   structurally-valid-but-empty plans. Use the *same* example every request — do
   not tailor it per task.
-- **`response_format` (structured outputs) enforces structure, not semantics.**
+- **`response_format` (structured outputs) enforces structure, not semantics —
+  and whether it pays depends on planner strength.**
   It cannot replace the example, support is per-model-version (test it), and it
-  adds input tokens for zero output savings. Use it only for fan-out / hard
-  structural guarantees; freeform + lean schema + example is otherwise as
-  reliable and cheaper. *For two-round it can even hurt* (the binder mutated the
-  graph under a strict schema) — prefer freeform there.
+  adds input tokens for zero output savings.
+  - **Strong planner:** freeform + lean schema + example is as reliable and
+    cheaper. Use `response_format` only for fan-out / hard structural guarantees.
+    On a strong model it adds tokens for no reliability gain (its malformed-JSON
+    rate is already 0%).
+  - **Weak / mid planner (the new finding): `response_format` on the *planner*
+    round is the single biggest reliability lever for two-round.** It makes the
+    malformed-plan shape (§6) unrepresentable. Measured: planner-round unparseable
+    JSON **49%→~0%** on a small model (96%→0% at the deepest level), success
+    **~39%→71%** (mid model **~79%→95%**) — token-neutral (the schema is
+    input-only and it removes the malformed *retries*).
+  - **Caveat — round, not just model:** the older "prefer freeform for two-round"
+    rule was about the *Binder* on a *strong* model mutating the graph under a
+    strict schema. That is round- and strength-specific. Net: enable
+    `response_format` on a **weak/mid planner round**; keep a strong model freeform
+    throughout; treat the binder under a strict schema with care (re-validate the
+    graph is unchanged — §5/HOWTO §4.4).
 
 ---
 
@@ -131,7 +153,14 @@ Output tokens are set by the **schema** and the **DAG shape**, nothing else.
   subject text, have the planner write `{{slot_id}}` and the runtime substitute
   the candidate's label deterministically (a bounded transform). Keeps
   label-into-text authoring on the one-call auto-bind path and closes the
-  transform gap without a helper tool.
+  transform gap without a helper tool. **Guard it with a negative rule:** `{{ }}`
+  wraps ONLY a declared slot_id — never a `$ref`, node id, or expression (a `$ref`
+  replaces the *whole* field; it can't be embedded in a sentence), and text
+  already in the request should be written literally, not referenced. Without the
+  clause a strong planner that already wrote the correct literal *also* appends
+  `"… {{$ref:{source:node,…}}}"`, which the validator rejects as an undeclared
+  slot. Measured: the clause took a strong model **80%→98%** on "mention X in the
+  body/subject" tasks at flat token cost — a prompt fix, not an example gap.
 - **Strip stray `input` keys to the tool's schema** before execution (workflow
   *and* the two-round binder). Recovers structurally-complete plans a strict
   input check would otherwise discard — the single highest-leverage robustness
@@ -172,6 +201,16 @@ Output tokens are set by the **schema** and the **DAG shape**, nothing else.
   should route to a utility node (`search_*`) — give the planner that tool.
   Don't expect the Binder to disambiguate a *named* thing among harvested
   candidates; its candidate-choice power is for genuinely *deictic* references.
+- **Malformed plan JSON on a weak planner is *structural*, not semantic.** A
+  small model's #1 two-round failure is emitting unparseable JSON — and (measured)
+  **100% of those replies are brace-unbalanced around the nested `$ref` object**
+  `{"$ref":{"source","node","path"}}`: it nests a sibling key inside the ref and
+  drops a `}`. It scales with ref count (a deeper DAG is worse: ~25%→54%→96% as
+  refs go 1→3 on a small model), so *more examples don't help* — examples can't
+  fix brace-counting. Two fixes: (a) `response_format` on the planner round makes
+  the bad shape unrepresentable (§4) — do this now; (b) a **flatter `$ref`** form
+  (`{"$ref":"node/field"}`, one level) removes it at the source *and* cuts output
+  tokens (HOWTO §9).
 - **Planner capacity ceiling.** Both DAG paradigms inherit the planner's
   DAG-authoring limit. A weak/small model has none → use sequential there.
 - **Score by side effects, not prose.** Verify the draft/event/message/token
@@ -206,6 +245,10 @@ Output tokens are set by the **schema** and the **DAG shape**, nothing else.
   planner.
 - **Output tokens are bought by the schema, not the model** — a lean schema is a
   free ~70% output cut.
+- **On a weak/mid planner, `response_format` is the two-round reliability lever**
+  — it removes the structural (nested-`$ref`) malformed JSON token-neutrally
+  (small model ~39%→71%, mid ~79%→95%); a strong planner needs only freeform + the
+  `{{ }}` negative-rule clause.
 - **Two-round-trip + auto-bind** matches sequential on success for simple
   context tasks (winning on cost) and beats it on complex multi-step ones
   (winning on the wired-and-validated dataflow), while adding clean refusal and
