@@ -219,6 +219,18 @@ private struct LabelViewTool: ViewTool {
         #expect(prompt.contains("Side effect: none."))
     }
 
+    @Test func workflowNodesDefaultToTwentySecondTimeout() throws {
+        #expect(WorkflowNodePolicy.defaultTimeoutMS == 20_000)
+        #expect(WorkflowNodePolicy().timeoutMS == 20_000)
+        #expect(WorkflowNode(id: "summarize", tool: "summarizeImageBlock").policy.timeoutMS == 20_000)
+
+        let data = """
+        {"id":"summarize","tool":"summarizeImageBlock","input":{}}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(WorkflowNode.self, from: data)
+        #expect(decoded.policy.timeoutMS == 20_000)
+    }
+
     @Test func workflowOutputRedactorUsesToolSensitivity() {
         let sensitive = ToolDescriptor(
             name: "sensitive",

@@ -166,6 +166,8 @@ public struct WorkflowNode: Sendable, Codable, Hashable, Identifiable {
 }
 
 public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
+    public static let defaultTimeoutMS = 20_000
+
     public enum OnError: String, Sendable, Codable, Hashable {
         case abort
         case continueWithNull = "continue_with_null"
@@ -179,7 +181,7 @@ public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
     public var defaultOutput: JSONValue?
 
     public init(
-        timeoutMS: Int = 5_000,
+        timeoutMS: Int = Self.defaultTimeoutMS,
         retry: WorkflowRetryPolicy = .default,
         onError: OnError = .abort,
         defaultOutput: JSONValue? = nil
@@ -201,7 +203,7 @@ public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.timeoutMS = try c.decodeIfPresent(Int.self, forKey: .timeoutMS) ?? 5_000
+        self.timeoutMS = try c.decodeIfPresent(Int.self, forKey: .timeoutMS) ?? Self.defaultTimeoutMS
         self.retry = try c.decodeIfPresent(WorkflowRetryPolicy.self, forKey: .retry) ?? .default
         self.onError = try c.decodeIfPresent(OnError.self, forKey: .onError) ?? .abort
         self.defaultOutput = try c.decodeIfPresent(JSONValue.self, forKey: .defaultOutput)
