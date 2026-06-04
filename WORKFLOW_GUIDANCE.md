@@ -155,11 +155,19 @@ Under auto-bind the Planner round is almost the entire cost, so squeeze it.
   from structure. Emit `"outcome":"cannot_plan"` (+ `message`) *only* to refuse.
   A `context_slot` is `{slot_id, source}` and nothing else (`required` defaults
   true). Measured: **−44% planner output tokens**, success equal-or-better.
-- **Under `response_format`, remove those fields from the SCHEMA entirely** — not
-  just from `required`. Strict mode forbids optional properties, so any field
-  left in `properties` is forced and the tokens come back. (`WorkflowTwoRoundSchema`
-  already omits them.) This composes with §4's weak/mid-planner structured-output
-  lever: the schema is both *leaner* and still kills the malformed-`$ref` shape.
+- **Under `response_format`, remove the *prose* fields from the SCHEMA entirely**
+  — not just from `required`. Strict mode forbids optional properties, so any
+  field left in `properties` is forced and the tokens come back.
+  `WorkflowTwoRoundSchema.planner` therefore drops `intent_summary` and the
+  slot's `reason`/`required`. It deliberately **keeps `outcome` and `message`
+  required** (a structured planner must still emit them, since strict mode can't
+  make them optional): that is *not* a contradiction with the freeform "omit
+  outcome" rule — on the freeform path the planner omits them and the runtime
+  derives the outcome from structure (`WorkflowPlan.effectiveOutcome`), while on
+  the structured path it emits `outcome` (still structurally derived) and a
+  `null` `message` unless refusing. This composes with §4's weak/mid-planner
+  structured-output lever: the schema is both *leaner* and still kills the
+  malformed-`$ref` shape.
 - **Guard rails — load-bearing on a STRONG planner at high difficulty.** Bare
   compaction *regressed the strong model* on hard tasks (it slotted things it
   shouldn't); the dropped prose had been silent error-correction the model only
@@ -183,8 +191,8 @@ Under auto-bind the Planner round is almost the entire cost, so squeeze it.
   planner on the `{{slot}}` path appends a stray `}` (the `{{ }}` token in a body
   string mis-counts its braces); the extractor must ignore braces inside strings
   and stop at the first depth-0 close. That, not structured output, is what
-  recovers the authoring-path stray brace (see AIKit `WorkflowTwoRoundRunner` /
-  `WORKFLOW_TWO_ROUND_RUNNER.md`).
+  recovers the authoring-path stray brace (see AIKit `WorkflowTwoRoundRunner` and
+  its `README.md` → "Two-round-trip runner recipe").
 
 ---
 
