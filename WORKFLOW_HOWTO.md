@@ -178,27 +178,29 @@ The two calls are **separate provider conversations** (fresh requests), never a
 continued chat. Round 1 sees the tool universe but not the private ids; Round 2
 sees only the selected tools + the harvested packet.
 
-### 4.2 Round-1 Planner output (lean)
+### 4.2 Round-1 Planner output (lean — `two_round.planner.v2.1`)
 
 ```json
 {
-  "outcome": "requires_binding",
-  "intent_summary": "Message the foreground contact about the open doc.",
   "nodes": [
     {"id": "send", "tool": "send_message",
      "input": {"contactID": {"$slot": "current_contact"},
                "body": "Reminder about {{foreground_document}}."}}
   ],
   "context_slots": [
-    {"slot_id": "current_contact",    "source": "current_contact",    "reason": "…", "required": true},
-    {"slot_id": "foreground_document","source": "foreground_document","reason": "…", "required": true}
+    {"slot_id": "current_contact",     "source": "current_contact"},
+    {"slot_id": "foreground_document", "source": "foreground_document"}
   ]
 }
 ```
 
-`outcome` ∈ `self_contained | requires_binding | cannot_plan`. Derive the
-*effective* outcome from structure (any `$slot`/declared slot ⇒ requires
-binding), not just the label.
+Emit **only** `nodes` + `context_slots`. A `context_slot` is `{slot_id, source}`
+— no `reason`, no `required` (defaults true). **Omit `intent_summary` and
+`outcome`** on the normal path: the runtime derives the *effective* outcome from
+structure (any `$slot`/declared slot ⇒ requires binding). Set
+`"outcome":"cannot_plan"` (+ `message`) *only* to refuse. See §4b of
+`WORKFLOW_GUIDANCE.md` for the rationale and the guard-rail clauses that keep a
+strong planner robust under this lean shape.
 
 ### 4.3 Harvest (deterministic, local, no LLM)
 

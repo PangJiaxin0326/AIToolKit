@@ -14,11 +14,23 @@ import Foundation
 ///   one-call path).
 /// - **Use ONLY listed tools** (the #1 planner failure is hallucinating a
 ///   `get_*` tool to reach local state — declare a slot instead).
-/// - **One fixed worked example is load-bearing** (structure ≠ semantics; a
-///   strict schema can't supply it).
+/// - **Two fixed worked examples are load-bearing** (structure ≠ semantics; a
+///   strict schema can't supply it): a self-contained node-`$ref` plan and a
+///   two-slot + `{{token}}` plan. Keep them fixed; don't tailor per task.
+/// - **Lean planner output (v2.1):** emit only `nodes` + `context_slots`; a slot
+///   is `{slot_id, source}`; omit `intent_summary`/`outcome` (derived) — ≈−44%
+///   output tokens. See `WORKFLOW_GUIDANCE.md` §4b.
+/// - **Guard rails (v2.1):** a slot `source` must be a declared source; never
+///   slot a named/derivable entity or its title; never `null` a required id —
+///   these keep a *strong* planner robust under the lean shape on hard tasks.
 public enum WorkflowTwoRoundPrompt {
-    public static let plannerVersion = "two_round.planner.v1"
-    public static let binderVersion = "two_round.binder.v1"
+    // v2.1: lean planner output (drop intent_summary + per-slot reason; slot is
+    // {slot_id, source}; outcome derived) ≈ −44% planner output, plus guard-rail
+    // clauses that recover strong-model robustness on hard tasks (a bare lean
+    // prompt regressed a strong planner 35→32/35 on a hard ladder; the guards
+    // took it to 34/35 and a weak planner to 35/35 — aggregate above the rich v1).
+    public static let plannerVersion = "two_round.planner.v2.1"
+    public static let binderVersion = "two_round.binder.v2"
 
     // MARK: Round-1 Planner
 
@@ -30,38 +42,42 @@ public enum WorkflowTwoRoundPrompt {
         You are a workflow PLANNER. Turn the user request into a DAG of tool \
         calls. Output ONLY one JSON object (no prose, no code fence).
 
-        Each node is {id, tool, input}. `input` holds ONLY that tool's own \
-        parameters — never put id, tool, or depends_on inside input. A node \
-        depends on another by referencing its output: \
-        {"$ref":{"source":"node","node":"<id>","path":"/field"}} (JSON Pointer). \
-        Put source nodes before the nodes that consume them; do not copy an \
-        upstream value, reference it.
+        Each node is {id, tool, input}; `input` holds ONLY that tool's own \
+        parameters (never id/tool/depends_on). To use one node's output in a \
+        later node, reference it — \
+        {"$ref":{"source":"node","node":"<id>","path":"/field"}} — never copy the \
+        value; put the source node first.
 
-        HARD RULE: use ONLY the tools listed under "Available tools". NEVER name \
-        any other tool. If you feel you need a tool that is not listed to reach \
-        local device state, use a context slot instead.
+        Use ONLY the tools listed under "Available tools" — never name another. \
+        Resolve an id the user NAMED (a contact name, a doc title) with a listed \
+        utility tool as a node.
 
-        Resolve ids the user NAMED (a contact's name, a document's title) with \
-        the listed utility tools as nodes.
+        For LOCAL DEVICE STATE referred to deictically ("the contact I'm \
+        viewing", "this document", "my default slot"): do NOT invent or fetch the \
+        id, and do NOT reach for an unlisted get_* tool — put {"$slot":"<slot_id>"} \
+        in that field and declare it in context_slots with a source from: \
+        \(sourceList). A later local step fills it.
 
-        For a value that depends on LOCAL DEVICE STATE the user referred to \
-        deictically — "the contact I'm viewing", "this document", "my default \
-        slot" — do NOT invent or fetch the id. Put {"$slot":"<slot_id>"} in that \
-        input field and declare the slot in `context_slots` with one of these \
-        sources: \(sourceList). A later local step fills it.
+        If a text field (body/subject) must MENTION local content you can't see \
+        (e.g. the open doc's title), write the token {{slot_id}} where the name \
+        goes and declare that slot; the runtime substitutes the title. {{ }} \
+        wraps ONLY a declared slot_id — never a $ref, node id, or expression (a \
+        $ref replaces the WHOLE field, it can't sit inside a sentence). If the \
+        text is already in the user's request, write it literally.
 
-        If a text field (a message body or a subject) must MENTION local content \
-        you cannot see (e.g. the open document's title), declare the matching \
-        slot and write the placeholder token {{slot_id}} where that name should \
-        appear — e.g. "Reminder about {{foreground_document}}". The runtime \
-        substitutes the harvested title. Do NOT add a tool node just to fetch a \
-        title, and do NOT invent the title.
+        Guard rails — a slot is ONLY for deictic state with a real harvest \
+        source. A slot `source` must be EXACTLY one of \(sourceList) — never a \
+        dotted/derived name (no "x.title"). Don't slot anything obtainable \
+        otherwise: a NAMED contact/document goes to a tool node, and to put its \
+        title in a subject write the name literally or reuse the SAME deictic \
+        slot's {{slot_id}} token — never a separate title slot. Every \
+        interactive node must keep its required id fields bound to a \
+        $slot/$ref/$bind/literal — never null.
 
-        Set `outcome`: "requires_binding" if you used any {"$slot"} / {{slot}} or \
-        declared any slot; "self_contained" if every input is a literal or a \
-        node $ref; "cannot_plan" (with a short `message`) if no safe DAG is \
-        possible. Never invent contact/document/slot ids. Prefer the smallest \
-        correct DAG.
+        Each context_slot is {slot_id, source} — nothing else. Emit no \
+        intent_summary and no outcome normally (both derived); to REFUSE set \
+        "outcome":"cannot_plan" with a short message. Never invent ids. Prefer \
+        the smallest correct DAG.
 
         \(plannerExamples())
         """
@@ -69,29 +85,20 @@ public enum WorkflowTwoRoundPrompt {
 
     private static func plannerExamples() -> String {
         """
-        Example A — self-contained (the user named the contact):
-        {"outcome":"self_contained","intent_summary":"Send Bob a hello.",\
-        "nodes":[\
+        Example A — self-contained (the user named the contact); a node $ref wires \
+        find→use, and no slot means it is self-contained:
+        {"nodes":[\
         {"id":"find_bob","tool":"find_contact","input":{"query":"Bob Singh"}},\
         {"id":"send","tool":"send_message","input":{"contactID":{"$ref":{"source":"node","node":"find_bob","path":"/contactID"}},"body":"Hi Bob."}}\
-        ],"context_slots":[],"message":null}
+        ],"context_slots":[]}
 
-        Example B — one deictic slot:
-        {"outcome":"requires_binding","intent_summary":"Message the foreground contact.",\
-        "nodes":[\
-        {"id":"send","tool":"send_message","input":{"contactID":{"$slot":"current_contact"},"body":"Hi."}}\
-        ],"context_slots":[\
-        {"slot_id":"current_contact","source":"current_contact","reason":"recipient is the viewed contact","required":true}\
-        ],"message":null}
-
-        Example C — two deictic slots + a label token in the subject:
-        {"outcome":"requires_binding","intent_summary":"Draft to the viewed contact about the open document.",\
-        "nodes":[\
+        Example B — two deictic slots + a label token in the subject:
+        {"nodes":[\
         {"id":"draft","tool":"create_email_draft","input":{"recipientContactID":{"$slot":"current_contact"},"subject":"About {{foreground_document}}","bodyDocumentID":{"$slot":"foreground_document"},"note":null}}\
         ],"context_slots":[\
-        {"slot_id":"current_contact","source":"current_contact","reason":"recipient is the viewed contact","required":true},\
-        {"slot_id":"foreground_document","source":"foreground_document","reason":"the open document","required":true}\
-        ],"message":null}
+        {"slot_id":"current_contact","source":"current_contact"},\
+        {"slot_id":"foreground_document","source":"foreground_document"}\
+        ]}
         """
     }
 
@@ -99,7 +106,8 @@ public enum WorkflowTwoRoundPrompt {
 
     /// The Binder runs in a FRESH provider thread: it never sees the Planner's
     /// prose, the full tool universe, or raw private content — only the validated
-    /// node list, the selected tool descriptors, and the candidate packet.
+    /// node list and the candidate packet. It binds slots to candidates; it does
+    /// not author tool parameters, so it is not given the tool schemas.
     public static func binderSystem() -> String {
         """
         You are a workflow PARAMETER BINDER. You receive a validated DAG (a node \

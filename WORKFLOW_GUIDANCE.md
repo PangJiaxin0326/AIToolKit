@@ -114,11 +114,12 @@ Output tokens are set by the **schema** and the **DAG shape**, nothing else.
   tool's strict input-schema check at execution and makes the node fail
   *silently*. `WorkflowNode`'s decoder strips those keys; keep that defense, and
   say it in the prompt.
-- **One fixed, general worked example is load-bearing.** The lean schema fixes
-  *structure*; the example supplies *semantics* (which tools, how to wire
-  `$ref`, that a plan ends in an action). Without it even a strong model emits
-  structurally-valid-but-empty plans. Use the *same* example every request — do
-  not tailor it per task.
+- **Fixed worked examples are load-bearing.** The lean schema fixes *structure*;
+  examples supply *semantics* (which tools, how to wire `$ref`, that a plan ends
+  in an action). Without them even a strong model emits structurally-valid-but-
+  empty plans. For two-round, **two** fixed examples anchor every shape — a
+  self-contained node-`$ref` plan and a two-deictic-slot plan with a `{{slot}}`
+  label token. Keep them fixed; do not tailor per task.
 - **`response_format` (structured outputs) enforces structure, not semantics —
   and whether it pays depends on planner strength.**
   It cannot replace the example, support is per-model-version (test it), and it
@@ -139,6 +140,51 @@ Output tokens are set by the **schema** and the **DAG shape**, nothing else.
     `response_format` on a **weak/mid planner round**; keep a strong model freeform
     throughout; treat the binder under a strict schema with care (re-validate the
     graph is unchanged — §5/HOWTO §4.4).
+
+---
+
+## 4b. Planner-output compaction & guard rails (`two_round.planner.v2.1`)
+
+Under auto-bind the Planner round is almost the entire cost, so squeeze it.
+`WorkflowTwoRoundPrompt` / `WorkflowTwoRoundSchema` implement this contract:
+
+- **Emit only what the runtime can't derive.** The planner JSON is just
+  `{"nodes":[…], "context_slots":[…]}`. **Drop `intent_summary` and each slot's
+  `reason`** (prose the harvester/compiler never read) and **omit `outcome`** on
+  the normal path — the runtime derives `self_contained` vs `requires_binding`
+  from structure. Emit `"outcome":"cannot_plan"` (+ `message`) *only* to refuse.
+  A `context_slot` is `{slot_id, source}` and nothing else (`required` defaults
+  true). Measured: **−44% planner output tokens**, success equal-or-better.
+- **Under `response_format`, remove those fields from the SCHEMA entirely** — not
+  just from `required`. Strict mode forbids optional properties, so any field
+  left in `properties` is forced and the tokens come back. (`WorkflowTwoRoundSchema`
+  already omits them.) This composes with §4's weak/mid-planner structured-output
+  lever: the schema is both *leaner* and still kills the malformed-`$ref` shape.
+- **Guard rails — load-bearing on a STRONG planner at high difficulty.** Bare
+  compaction *regressed the strong model* on hard tasks (it slotted things it
+  shouldn't); the dropped prose had been silent error-correction the model only
+  leaned on at difficulty. Recover it with three **clauses, not the output
+  fields** (cheap input protects the output win):
+  1. a slot `source` must be **exactly** one of the declared sources — never a
+     dotted/derived name (`foreground_document.title` is invalid);
+  2. **never slot anything obtainable another way** — a *named* contact/document
+     goes to a utility node; to put its title in a subject write the name
+     literally or reuse the SAME deictic slot's `{{slot_id}}` token — never a new
+     title slot;
+  3. every interactive node keeps its required id fields **bound** to a
+     `$slot`/`$ref`/`$bind`/literal — **never `null`**.
+- **Validate compaction on a HARD ladder with a LARGE tool manifest.** The
+  strong-model regression is invisible on simple tasks (lean and rich prompts
+  both hit 100%); it only appears on disambiguation / multi-action / transform-
+  chain tasks with many tools to choose from. Measured aggregate after the guard
+  rails: the guard-railed lean prompt is *more* reliable than the rich original
+  **and** cheaper (strong planner hard-suite 32→34/35, weak 33→35/35).
+- **The runner's JSON extractor must be brace-balanced and string-aware.** A weak
+  planner on the `{{slot}}` path appends a stray `}` (the `{{ }}` token in a body
+  string mis-counts its braces); the extractor must ignore braces inside strings
+  and stop at the first depth-0 close. That, not structured output, is what
+  recovers the authoring-path stray brace (see AIKit `WorkflowTwoRoundRunner` /
+  `WORKFLOW_TWO_ROUND_RUNNER.md`).
 
 ---
 

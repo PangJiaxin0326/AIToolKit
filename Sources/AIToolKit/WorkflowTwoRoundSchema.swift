@@ -17,24 +17,24 @@ public enum WorkflowTwoRoundSchema {
             ],
             required: ["id", "tool", "input"]
         )
+        // Lean slot: {slot_id, source} only. `reason`/`required` are derivable
+        // (required defaults true) and were pure output tokens — dropped so the
+        // strict schema can't force them. `intent_summary` likewise dropped (v2.1).
         let slot = ToolSchema.strictObject(
             properties: [
                 "slot_id": .string(description: "Stable id referenced by {\"$slot\":…} / {{slot_id}}."),
                 "source": .stringEnum(sources.sorted()),
-                "reason": .string,
-                "required": .boolean,
             ],
-            required: ["slot_id", "source", "reason", "required"]
+            required: ["slot_id", "source"]
         )
         return ToolSchema.strictObject(
             properties: [
                 "outcome": .stringEnum(["self_contained", "requires_binding", "cannot_plan"]),
-                "intent_summary": .string,
                 "nodes": .array(of: node, maxItems: 24),
                 "context_slots": .array(of: slot, maxItems: 12),
                 "message": .nullable(.string),
             ],
-            required: ["outcome", "intent_summary", "nodes", "context_slots", "message"]
+            required: ["outcome", "nodes", "context_slots", "message"]
         ).json
     }
 
