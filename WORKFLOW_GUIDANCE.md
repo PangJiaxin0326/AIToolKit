@@ -174,7 +174,11 @@ Under auto-bind the Planner round is almost the entire cost, so squeeze it.
   leaned on at difficulty. Recover it with three **clauses, not the output
   fields** (cheap input protects the output win):
   1. a slot `source` must be **exactly** one of the declared sources — never a
-     dotted/derived name (`foreground_document.title` is invalid);
+     dotted/derived name (`foreground_document.title` is invalid). This one is
+     also **enforced in code**: pass `recognizedSources` to
+     `WorkflowTwoRoundCompiler.validatePlan` (the runner does) and an invented
+     source fails fast as `unrecognizedSlotSource` instead of silently as a
+     harvest "missing";
   2. **never slot anything obtainable another way** — a *named* contact/document
      goes to a utility node; to put its title in a subject write the name
      literally or reuse the SAME deictic slot's `{{slot_id}}` token — never a new

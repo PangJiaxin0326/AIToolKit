@@ -14,6 +14,7 @@ public enum WorkflowTwoRoundCompiler {
         case missingTool(node: String)
         case forwardOrMissingRef(node: String, ref: String)
         case undeclaredSlot(node: String, slot: String)
+        case unrecognizedSlotSource(slot: String, source: String)
         case graphMutated(String)
         case unboundSlot(node: String, slot: String)
         case unknownCandidate(node: String, candidate: String)
@@ -28,6 +29,7 @@ public enum WorkflowTwoRoundCompiler {
             case .missingTool(let n): return "node \(n) has no tool"
             case .forwardOrMissingRef(let n, let r): return "node \(n) refs \(r) which is not an earlier node"
             case .undeclaredSlot(let n, let s): return "node \(n) uses undeclared slot \(s)"
+            case .unrecognizedSlotSource(let s, let src): return "slot \(s) declares unrecognized source \(src)"
             case .graphMutated(let why): return "binder mutated the graph: \(why)"
             case .unboundSlot(let n, let s): return "node \(n) still has unbound slot \(s)"
             case .unknownCandidate(let n, let c): return "node \(n) binds unknown candidate \(c)"
@@ -42,10 +44,24 @@ public enum WorkflowTwoRoundCompiler {
     /// `$ref` points to an *earlier* node, and that every `$slot` / `{{label}}`
     /// token names a declared slot (so the harvester fetches it and no token
     /// leaks as literal text). O(N).
+    ///
+    /// When `recognizedSources` is non-nil, also enforces the v2.1 guard rail
+    /// that every declared slot's `source` is one of the recognized harvest
+    /// sources — promoting a prompt clause to a hard guarantee, so a planner that
+    /// invents a derived source (e.g. `foreground_document.title`) fails fast
+    /// here instead of silently as a harvest "missing" later. Pass `nil` to skip
+    /// (back-compatible).
     public static func validatePlan(
-        _ plan: WorkflowPlan, availableTools: Set<String>
+        _ plan: WorkflowPlan,
+        availableTools: Set<String>,
+        recognizedSources: Set<String>? = nil
     ) throws {
         guard !plan.nodes.isEmpty else { throw CompileError.emptyPlan }
+        if let recognizedSources {
+            for slot in plan.contextSlots where !recognizedSources.contains(slot.source) {
+                throw CompileError.unrecognizedSlotSource(slot: slot.slotID, source: slot.source)
+            }
+        }
         let declared = Set(plan.contextSlots.map(\.slotID))
         var prior = Set<String>()
         for node in plan.nodes {

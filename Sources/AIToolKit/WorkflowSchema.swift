@@ -155,7 +155,7 @@ public enum WorkflowPromptBuilder {
     public static func planningInstruction(
         toolManifest: [ToolDescriptor],
         minimal: Bool = false,
-        includeExample: Bool = false
+        includeExample: Bool = true
     ) -> String {
         let tools = toolManifest
             .map { descriptor in
