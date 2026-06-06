@@ -167,14 +167,23 @@ public enum WorkflowTwoRoundCompiler {
             }
             resolved.append(WorkflowPlanNode(id: boundNode.id, tool: boundNode.tool, input: input))
         }
-        // Safety net: resolve any residual `{{slot_id}}` tokens the Binder passed
-        // through, using the best (current/sole) candidate per slot.
+        // Safety net: resolve residual `{{slot_id}}` tokens the Binder passed
+        // through only when the packet makes the label deterministic.
         let labelForSlot = Dictionary(packet.slots.compactMap { slot -> (String, String)? in
-            let pick = slot.candidates.first(where: \.isCurrent) ?? slot.candidates.first
+            let pick: HarvestedCandidate?
+            if slot.candidates.count == 1 {
+                pick = slot.candidates.first
+            } else {
+                let currents = slot.candidates.filter(\.isCurrent)
+                pick = currents.count == 1 ? currents.first : nil
+            }
             return pick.map { (slot.slotID, $0.displayLabel) }
         }, uniquingKeysWith: { a, _ in a })
-        return resolved.map { node in
-            WorkflowPlanNode(
+        return try resolved.map { node in
+            for token in TwoRoundValue.labelTokens(in: node.input) where labelForSlot[token] == nil {
+                throw CompileError.unboundSlot(node: node.id, slot: token)
+            }
+            return WorkflowPlanNode(
                 id: node.id, tool: node.tool,
                 input: TwoRoundValue.resolveLabels(in: node.input) { labelForSlot[$0] })
         }

@@ -1,10 +1,10 @@
 import Foundation
 
-/// Strict, *lean* JSON schemas for the two round trips (for providers that
-/// support `response_format: json_schema`). Lean = only the fields the runtime
-/// can't default, so output tokens stay minimal; `input` is an open object (the
-/// value algebra lives inside it). Freeform + a worked example is usually as
-/// reliable and cheaper — see `WorkflowTwoRoundPrompt`.
+/// Strict, lean JSON schemas for hosts that explicitly opt into provider
+/// `response_format: json_schema`. The validated v2.1 recipe leaves the planner
+/// freeform, but this schema mirrors the same lean contract instead of the
+/// legacy verbose envelope. `input` stays open because the value algebra lives
+/// inside it.
 public enum WorkflowTwoRoundSchema {
     /// Round-1 Planner response schema. `sources` = the recognized context
     /// source names the planner may declare.
@@ -17,28 +17,27 @@ public enum WorkflowTwoRoundSchema {
             ],
             required: ["id", "tool", "input"]
         )
-        // Lean slot: {slot_id, source} only. `reason`/`required` are derivable
-        // (required defaults true) and were pure output tokens — dropped so the
-        // strict schema can't force them. `intent_summary` likewise dropped (v2.1).
         let slot = ToolSchema.strictObject(
             properties: [
-                "slot_id": .string(description: "Stable id referenced by {\"$slot\":…} / {{slot_id}}."),
+                "slot_id": .string(description: "Stable id referenced by {\"$slot\":...} / {{slot_id}}."),
                 "source": .stringEnum(sources.sorted()),
             ],
             required: ["slot_id", "source"]
         )
         return ToolSchema.strictObject(
             properties: [
-                "outcome": .stringEnum(["self_contained", "requires_binding", "cannot_plan"]),
                 "nodes": .array(of: node, maxItems: 24),
                 "context_slots": .array(of: slot, maxItems: 12),
+                "outcome": .stringEnum(["cannot_plan"]),
                 "message": .nullable(.string),
             ],
-            required: ["outcome", "nodes", "context_slots", "message"]
+            required: ["nodes", "context_slots"]
         ).json
     }
 
-    /// Round-2 Binder response schema (Schema A: the full bound node list).
+    /// Round-2 Binder response schema (full bound node list).
+    /// AIKit's v2.1 runner keeps the Binder freeform; this schema is retained as
+    /// a library asset for hosts that experiment outside the validated recipe.
     public static func binder(toolNames: [String]) -> JSONValue {
         let node = ToolSchema.strictObject(
             properties: [

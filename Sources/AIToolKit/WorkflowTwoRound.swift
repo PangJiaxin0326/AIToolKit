@@ -227,8 +227,10 @@ public struct WorkflowPlanNode: Sendable, Hashable, Codable {
     }
 }
 
-/// A declared local-context slot the planner needs filled. `source` is an
-/// app-defined harvest-source name (the harvester interprets it).
+/// A declared local-context slot the planner needs filled. The v2.1 planner
+/// contract emits only `{slot_id, source}`. `reason` and `required` are retained
+/// for legacy decoders and host-authored plans; omitted planner fields default
+/// to an empty reason and required=true.
 public struct WorkflowContextSlot: Sendable, Hashable, Codable {
     public var slotID: String
     public var source: String
@@ -263,7 +265,10 @@ public struct WorkflowPlan: Sendable, Hashable, Codable {
     }
 
     public var schemaVersion: String
+    /// The v2.1 normal path omits `outcome`; the decoder derives an effective
+    /// outcome from structure. `cannot_plan` is still accepted for refusals.
     public var outcome: Outcome
+    /// Legacy summary field. The v2.1 planner prompt omits it.
     public var intentSummary: String
     public var nodes: [WorkflowPlanNode]
     public var contextSlots: [WorkflowContextSlot]
@@ -305,12 +310,16 @@ public struct WorkflowPlan: Sendable, Hashable, Codable {
     }
 
     /// Effective outcome derived from *structure* rather than the label: a plan
-    /// with no slot placeholders/declarations is self-contained even if the
-    /// model said "requires_binding". `cannot_plan` is always honoured.
+    /// with no slot placeholders, label tokens, or declarations is
+    /// self-contained even if the model said "requires_binding". `cannot_plan`
+    /// is always honoured.
     public var effectiveOutcome: Outcome {
         if outcome == .cannotPlan { return .cannotPlan }
         let hasSlots = !contextSlots.isEmpty
-            || nodes.contains { !TwoRoundValue.slotIDs(in: $0.input).isEmpty }
+            || nodes.contains {
+                !TwoRoundValue.slotIDs(in: $0.input).isEmpty
+                    || !TwoRoundValue.labelTokens(in: $0.input).isEmpty
+            }
         return hasSlots ? .requiresBinding : .selfContained
     }
 }

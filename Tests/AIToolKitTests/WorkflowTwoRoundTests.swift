@@ -200,6 +200,80 @@ struct WorkflowTwoRoundTests {
         }
     }
 
+    @Test func resolveBindingRejectsAmbiguousResidualLabelToken() {
+        let plan = WorkflowPlan(
+            outcome: .requiresBinding,
+            nodes: [
+                WorkflowPlanNode(
+                    id: "send",
+                    tool: "send_message",
+                    input: .object(["body": .string("About {{foreground_document}}")])
+                ),
+            ],
+            contextSlots: [
+                WorkflowContextSlot(slotID: "foreground_document", source: "foreground_document"),
+            ]
+        )
+        let binding = WorkflowBinding(status: .complete, nodes: [
+            WorkflowPlanNode(
+                id: "send",
+                tool: "send_message",
+                input: .object(["body": .string("About {{foreground_document}}")])
+            ),
+        ])
+        let ambiguousPacket = ContextPacket(slots: [
+            HarvestedSlot(
+                slotID: "foreground_document",
+                source: "foreground_document",
+                status: .resolved,
+                candidates: [
+                    HarvestedCandidate(
+                        candidateID: "ctx_foreground_document_0",
+                        label: "Budget Memo",
+                        kind: "document_id",
+                        value: .string("d_budget"),
+                        isCurrent: false
+                    ),
+                    HarvestedCandidate(
+                        candidateID: "ctx_foreground_document_1",
+                        label: "Roadmap Memo",
+                        kind: "document_id",
+                        value: .string("d_roadmap"),
+                        isCurrent: false
+                    ),
+                ],
+                required: true
+            ),
+        ])
+        #expect(throws: WorkflowTwoRoundCompiler.CompileError.self) {
+            try WorkflowTwoRoundCompiler.resolveBinding(
+                binding,
+                plan: plan,
+                packet: ambiguousPacket
+            )
+        }
+    }
+
+    @Test func renderPlanNodesEscapesJSONScalars() throws {
+        let rendered = WorkflowTwoRoundPrompt.renderPlanNodes([
+            WorkflowPlanNode(
+                id: "send",
+                tool: "send_\"message",
+                input: .object(["body": .string("Line 1\nLine 2 \"quoted\"")])
+            ),
+        ])
+        let value = try JSONDecoder().decode(JSONValue.self, from: Data(rendered.utf8))
+        guard case .object(let object) = value,
+              case .object(let input)? = object["input"]
+        else {
+            Issue.record("rendered node must be valid JSON object")
+            return
+        }
+        #expect(object["id"] == .string("send"))
+        #expect(object["tool"] == .string("send_\"message"))
+        #expect(input["body"] == .string("Line 1\nLine 2 \"quoted\""))
+    }
+
     // MARK: plan cache
 
     @Test func planCacheHitsOnRepeatIntent() async {
@@ -228,5 +302,14 @@ struct WorkflowTwoRoundTests {
             WorkflowPlanNode(id: "a", tool: "t", input: .object(["x": .string("lit")])),
         ])
         #expect(plain.effectiveOutcome == .selfContained)
+
+        let withLabelToken = WorkflowPlan(outcome: .selfContained, nodes: [
+            WorkflowPlanNode(
+                id: "a",
+                tool: "t",
+                input: .object(["x": .string("About {{foreground_document}}")])
+            ),
+        ])
+        #expect(withLabelToken.effectiveOutcome == .requiresBinding)
     }
 }

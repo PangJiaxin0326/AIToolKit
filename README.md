@@ -66,7 +66,7 @@ await registry.register(EchoTool())
 
 Tools can also be called directly with `try await tool(input, in: context)`.
 
-## Workflows (one-shot DAG) and two-round-trip
+## Workflows and two-round-trip APIs
 
 AIToolKit also ships a one-shot **workflow** layer — the model emits one
 `WorkflowSpec` (a DAG of tool calls wired by `$ref` JSON Pointers) and the device
@@ -88,7 +88,7 @@ layer (Plan → local context harvest → Bind) builds on the same executor:
   lower-to-`WorkflowSpec` logic (no LLM).
 - `ContextHarvesting` — the deterministic local context-harvest protocol;
   `ContextPacket` / `HarvestedCandidate` — its output.
-- `WorkflowTwoRoundSchema` / `WorkflowTwoRoundPrompt` — strict schemas + the
+- `WorkflowTwoRoundSchema` / `WorkflowTwoRoundPrompt` — schema assets and the
   versioned planner/binder instructions.
 - `WorkflowPlanCache` — caches the Round-1 plan so a repeated intent skips the
   planner call.
@@ -96,11 +96,8 @@ layer (Plan → local context harvest → Bind) builds on the same executor:
 The runtime driver that issues the two LLM calls is `WorkflowTwoRoundRunner`
 (in AIKit's `AIKitRuntime`).
 
-See:
-
-- **[WORKFLOW_GUIDANCE.md](WORKFLOW_GUIDANCE.md)** — when to use sequential vs
-  workflow vs two-round-trip, the cost/reliability scaling laws, schema design,
-  and pitfalls.
-- **[WORKFLOW_HOWTO.md](WORKFLOW_HOWTO.md)** — step-by-step: the node value
-  algebra, the one-shot pipeline, authoring tools well, the two-round-trip layer,
-  auto-bind, and recipes.
+The current developer guidance and reproduction recipe live in AIKit
+[`AGENTS.md`](https://github.com/PangJiaxin0326/AIKit/blob/main/AGENTS.md). This
+README only inventories AIToolKit APIs so the recommendations stay in one place.
+The legacy workflow guide files in this package are forwarding pages to that
+source of truth.

@@ -91,7 +91,7 @@ public enum JSONSchemaValidator {
             let unwrapped = nonNullSchema(object)
             guard case .object(let concrete) = unwrapped else { return nil }
             if isArraySchema(concrete), let items = concrete["items"] {
-                guard Int(token) != nil else { return nil }
+                guard let index = Int(token), index >= 0 else { return false }
                 current = items
                 continue
             }

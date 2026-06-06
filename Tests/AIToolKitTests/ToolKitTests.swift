@@ -206,6 +206,24 @@ private struct LabelViewTool: ViewTool {
         }
         #expect(fields["additionalProperties"] == .bool(false))
     }
+
+    @Test func jsonValueIntValueRejectsUnsafeNumbers() {
+        #expect(JSONValue.number(42.0).intValue == 42)
+        #expect(JSONValue.number(42.5).intValue == nil)
+        #expect(JSONValue.number(.infinity).intValue == nil)
+        #expect(JSONValue.number(.nan).intValue == nil)
+        #expect(JSONValue.number(Double.greatestFiniteMagnitude).intValue == nil)
+    }
+
+    @Test func schemaReferencePathRejectsNegativeArrayIndex() {
+        let item = ToolSchema.strictObject(
+            properties: ["value": .string],
+            required: ["value"]
+        )
+        let schema = ToolSchema.array(of: item).json
+        #expect(JSONSchemaValidator.referencePathExists("/0/value", in: schema) == true)
+        #expect(JSONSchemaValidator.referencePathExists("/-1/value", in: schema) == false)
+    }
 }
 
 @Suite struct WorkflowKitTests {

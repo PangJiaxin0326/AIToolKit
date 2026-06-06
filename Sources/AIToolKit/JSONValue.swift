@@ -96,8 +96,8 @@ extension JSONValue {
         switch self {
         case .int(let value):
             return value
-        case .number(let value) where value.rounded() == value:
-            return Int(value)
+        case .number(let value):
+            return Self.integral(value)
         default:
             return nil
         }
