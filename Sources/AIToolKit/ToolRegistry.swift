@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 /// Process-wide tool registry. Allows per-view subsetting via the tool-name
 /// set the host caller supplies (AIKitCapability's `ViewContext.toolNames`
@@ -8,6 +9,7 @@ public actor ToolRegistry {
 
     private struct Entry {
         let descriptor: ToolDescriptor
+        let foundationTool: @Sendable (ToolContext) throws -> any FoundationModels.Tool
         let call: @Sendable (Data, ToolContext) async throws -> Data
     }
 
@@ -18,7 +20,12 @@ public actor ToolRegistry {
     public func register<T: Tool>(_ tool: T) {
         let descriptor = T.descriptor
         let name = T.name
-        entries[name] = Entry(descriptor: descriptor) { data, context in
+        entries[name] = Entry(
+            descriptor: descriptor,
+            foundationTool: { context in
+                try FoundationToolAdapter(tool, context: context)
+            }
+        ) { data, context in
             let decoder = JSONDecoder()
             let encoder = JSONEncoder()
             let input: T.Input
@@ -42,6 +49,48 @@ public actor ToolRegistry {
         }
     }
 
+    public func register<T: FoundationModels.Tool>(
+        _ tool: T,
+        outputSchema: JSONValue? = nil,
+        annotations: ToolAnnotations? = nil,
+        inputExamples: [JSONValue]? = nil
+    ) where T.Output: ConvertibleToGeneratedContent {
+        let descriptor = ToolDescriptor(
+            tool: tool,
+            outputSchema: outputSchema,
+            annotations: annotations,
+            inputExamples: inputExamples
+        )
+        let name = tool.name
+        entries[name] = Entry(
+            descriptor: descriptor,
+            foundationTool: { _ in tool }
+        ) { data, _ in
+            let content: GeneratedContent
+            do {
+                content = try GeneratedContent(json: String(decoding: data, as: UTF8.self))
+            } catch {
+                throw ToolRegistryError.decodingFailed(
+                    name: name,
+                    detail: String(describing: error)
+                )
+            }
+
+            let arguments: T.Arguments
+            do {
+                arguments = try T.Arguments(content)
+            } catch {
+                throw ToolRegistryError.decodingFailed(
+                    name: name,
+                    detail: String(describing: error)
+                )
+            }
+
+            let output = try await tool.call(arguments: arguments)
+            return Data(output.generatedContent.jsonString.utf8)
+        }
+    }
+
     public func unregister(name: String) {
         entries.removeValue(forKey: name)
     }
@@ -53,6 +102,14 @@ public actor ToolRegistry {
     /// Returns the schema bundle for every registered tool.
     public func registeredDescriptors() -> [ToolDescriptor] {
         entries.values.map(\.descriptor).sorted { $0.name < $1.name }
+    }
+
+    public func registeredFoundationTools(
+        context: ToolContext = ToolContext()
+    ) throws -> [any FoundationModels.Tool] {
+        try entries.values
+            .sorted { $0.descriptor.name < $1.descriptor.name }
+            .map { try $0.foundationTool(context) }
     }
 
     public func descriptor(for name: String) -> ToolDescriptor? {
@@ -67,6 +124,16 @@ public actor ToolRegistry {
     /// An empty `names` set returns no tools.
     public func manifest(for names: Set<String>) -> [ToolDescriptor] {
         names.compactMap { entries[$0]?.descriptor }.sorted { $0.name < $1.name }
+    }
+
+    public func foundationTools(
+        for names: Set<String>,
+        context: ToolContext = ToolContext()
+    ) throws -> [any FoundationModels.Tool] {
+        try names
+            .compactMap { entries[$0] }
+            .sorted { $0.descriptor.name < $1.descriptor.name }
+            .map { try $0.foundationTool(context) }
     }
 
     /// Dispatches a call by name; decodes input, encodes output.

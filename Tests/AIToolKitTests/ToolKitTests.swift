@@ -1,9 +1,10 @@
 import Foundation
+import FoundationModels
 import SwiftUI
 import Testing
 @testable import AIToolKit
 
-private struct EchoTool: Tool {
+private struct EchoTool: AIToolKit.Tool {
     struct Input: Codable, Sendable { var text: String }
     struct Output: Codable, Sendable { var echoed: String }
 
@@ -19,7 +20,7 @@ private struct EchoTool: Tool {
     }
 }
 
-private struct UppercaseTool: Tool {
+private struct UppercaseTool: AIToolKit.Tool {
     struct Input: Codable, Sendable { var text: String }
     struct Output: Codable, Sendable { var uppercased: String }
 
@@ -35,7 +36,7 @@ private struct UppercaseTool: Tool {
     }
 }
 
-private struct SeedTool: Tool {
+private struct SeedTool: AIToolKit.Tool {
     struct Input: Codable, Sendable { var value: String }
     struct Output: Codable, Sendable { var value: String }
 
@@ -61,7 +62,7 @@ private struct SeedTool: Tool {
     }
 }
 
-private struct JoinTool: Tool {
+private struct JoinTool: AIToolKit.Tool {
     struct Input: Codable, Sendable { var left: String; var right: String }
     struct Output: Codable, Sendable { var combined: String }
 
@@ -81,7 +82,7 @@ private struct JoinTool: Tool {
     }
 }
 
-private struct BadOutputTool: Tool {
+private struct BadOutputTool: AIToolKit.Tool {
     struct Input: Codable, Sendable {}
     struct Output: Codable, Sendable { var value: Int }
 
@@ -111,6 +112,25 @@ private struct LabelViewTool: ViewTool {
     @MainActor
     func call(_ input: Input, in context: ToolContext) async throws -> Text {
         Text("\(context.viewID):\(input.title)")
+    }
+}
+
+@Generable
+private struct OfficialToolInput {
+    var text: String
+}
+
+@Generable
+private struct OfficialToolOutput {
+    var uppercased: String
+}
+
+private struct OfficialUppercaseFoundationTool: FoundationModels.Tool {
+    var name: String { "official_uppercase" }
+    var description: String { "Uppercases input text." }
+
+    func call(arguments: OfficialToolInput) async throws -> OfficialToolOutput {
+        OfficialToolOutput(uppercased: arguments.text.uppercased())
     }
 }
 
@@ -155,6 +175,12 @@ private struct LabelViewTool: ViewTool {
         #expect(descriptor.outputSchema == EchoTool.outputSchema.json)
     }
 
+    @Test func descriptorConvertsToFoundationToolDefinition() throws {
+        let definition = try EchoTool.descriptor.foundationToolDefinition()
+        #expect(definition.name == EchoTool.name)
+        #expect(definition.description == EchoTool.description)
+    }
+
     @Test func toolCanUseCallAsFunction() async throws {
         let output = try await EchoTool().callAsFunction(
             EchoTool.Input(text: "hi"),
@@ -182,6 +208,33 @@ private struct LabelViewTool: ViewTool {
         #expect(callableOutput.uppercased == "GO.")
     }
 
+    @Test func toolAdaptsToFoundationTool() async throws {
+        let adapter = try FoundationToolAdapter(
+            EchoTool(),
+            context: ToolContext(viewID: "foundation")
+        )
+        let output = try await adapter.call(
+            arguments: GeneratedContent(json: #"{"text":"hi"}"#)
+        )
+        let outputValue = try JSONValue(data: Data(output.utf8))
+        #expect(outputValue == .object(["echoed": .string("foundation:hi")]))
+    }
+
+    @Test func registryCallsOfficialFoundationTool() async throws {
+        let registry = ToolRegistry()
+        await registry.register(OfficialUppercaseFoundationTool())
+        let outData = try await registry.call(
+            name: "official_uppercase",
+            jsonInput: Data(#"{"text":"hi"}"#.utf8),
+            context: ToolContext()
+        )
+        let outputValue = try JSONValue(data: outData)
+        #expect(outputValue == .object(["uppercased": .string("HI")]))
+
+        let foundationTools = try await registry.registeredFoundationTools()
+        #expect(foundationTools.map(\.name) == ["official_uppercase"])
+    }
+
     @Test func toolSchemaObjectHasRequiredFields() {
         let schema = ToolSchema.object(
             properties: ["a": .string],
@@ -204,6 +257,18 @@ private struct LabelViewTool: ViewTool {
             Issue.record("schema must be an object")
             return
         }
+        #expect(fields["additionalProperties"] == .bool(false))
+    }
+
+    @Test func toolSchemaConvertsToGenerationSchema() throws {
+        let schema = try EchoTool.inputSchema.generationSchema(title: "EchoInput")
+        let json = ToolSchema.jsonValue(for: schema)
+        guard case let .object(fields) = json else {
+            Issue.record("schema must encode as an object")
+            return
+        }
+        #expect(fields["title"] == .string("EchoInput"))
+        #expect(fields["x-order"] == .array([.string("text")]))
         #expect(fields["additionalProperties"] == .bool(false))
     }
 

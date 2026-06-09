@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 /// A small JSON Schema builder for describing tool inputs.
 public struct ToolSchema: Sendable, Hashable {
@@ -112,5 +113,87 @@ public struct ToolSchema: Sendable, Hashable {
             schema.json = .object(object)
         }
         return schema
+    }
+}
+
+extension ToolSchema {
+    /// Creates a schema from an official Foundation Models `GenerationSchema`.
+    public init(generationSchema: GenerationSchema) {
+        self.init(json: Self.jsonValue(for: generationSchema))
+    }
+
+    /// Creates a schema from a `Generable` type's official generation schema.
+    public init<Value: Generable>(
+        type: Value.Type,
+        description: String? = nil
+    ) {
+        var json = Self.jsonValue(for: Value.generationSchema)
+        if let description {
+            json = Self.addingDescription(description, to: json)
+        }
+        self.init(json: json)
+    }
+
+    /// Shorthand for `ToolSchema(type:)`.
+    public static func generable<Value: Generable>(
+        _ type: Value.Type,
+        description: String? = nil
+    ) -> ToolSchema {
+        ToolSchema(type: type, description: description)
+    }
+
+    /// Converts this JSON-schema subset into Foundation Models' official
+    /// `GenerationSchema` representation.
+    public func generationSchema(title: String = "Arguments") throws -> GenerationSchema {
+        let normalized = Self.normalizedForFoundation(json, title: title)
+        return try JSONDecoder().decode(GenerationSchema.self, from: normalized.data())
+    }
+
+    static func jsonValue(for schema: GenerationSchema) -> JSONValue {
+        do {
+            return try JSONValue(data: JSONEncoder().encode(schema))
+        } catch {
+            preconditionFailure("GenerationSchema failed to encode: \(error)")
+        }
+    }
+
+    private static func addingDescription(_ description: String, to json: JSONValue) -> JSONValue {
+        guard case .object(var object) = json else { return json }
+        object["description"] = .string(description)
+        return .object(object)
+    }
+
+    private static func normalizedForFoundation(_ json: JSONValue, title: String) -> JSONValue {
+        switch json {
+        case .object(var object):
+            if case .string("object") = object["type"] {
+                let properties = object["properties"]?.objectValue ?? [:]
+                let orderedKeys = properties.keys.sorted()
+                object["title"] = object["title"] ?? .string(title)
+                object["properties"] = .object(Dictionary(
+                    uniqueKeysWithValues: properties.map { key, value in
+                        (key, normalizedForFoundation(value, title: key))
+                    }
+                ))
+                object["required"] = object["required"] ?? .array([])
+                object["x-order"] = object["x-order"]
+                    ?? .array(orderedKeys.map(JSONValue.string))
+                object["additionalProperties"] = object["additionalProperties"] ?? .bool(false)
+            } else {
+                if case .array(let values) = object["anyOf"] {
+                    object["anyOf"] = .array(values.map {
+                        normalizedForFoundation($0, title: title)
+                    })
+                }
+                if let items = object["items"] {
+                    object["items"] = normalizedForFoundation(items, title: "\(title)Item")
+                }
+            }
+            return .object(object)
+        case .array(let values):
+            return .array(values.map { normalizedForFoundation($0, title: title) })
+        case .null, .bool, .int, .number, .string:
+            return json
+        }
     }
 }
