@@ -1,51 +1,40 @@
 import Foundation
+import FoundationModels
 import OSLog
 
-/// A typed, declarative unit of work the LLM can call.
-///
-/// AIToolKit defines the standard so any Swift package can ship `Tool`s
-/// without depending on the rest of AIKit. The hosting app wires them into an
-/// `AIKitCapability.ToolRegistry` and runs them through `AIKitRuntime`.
-///
-/// The interface follows Claude SDK / MCP naming: tools expose an
-/// `inputSchema` and are executed with `call(_:in:)`.
-public protocol Tool: Sendable {
-    associatedtype Input: Codable & Sendable
-    associatedtype Output: Codable & Sendable
+/// AIToolKit uses FoundationModels' official tool protocol as its tool base.
+public typealias Tool = FoundationModels.Tool
 
-    static var name: String { get }
-    static var description: String { get }
-    static var inputSchema: ToolSchema { get }
-    static var outputSchema: ToolSchema { get }
-    static var annotations: ToolAnnotations { get }
-    static var inputExamples: [JSONValue] { get }
-
-    func call(_ input: Input, in context: ToolContext) async throws -> Output
+public protocol ToolMetadataProviding: Sendable {
+    var annotations: ToolAnnotations { get }
+    var argumentExamples: [GeneratedContent] { get }
 }
 
-extension Tool {
-    public static var outputSchema: ToolSchema { .unknownObject }
-    public static var annotations: ToolAnnotations { .default }
-    public static var inputExamples: [JSONValue] { [] }
+extension ToolMetadataProviding {
+    public var annotations: ToolAnnotations { .default }
+    public var argumentExamples: [GeneratedContent] { [] }
+}
 
-    /// Callable shorthand for direct use outside a registry.
-    public func callAsFunction(
-        _ input: Input,
-        in context: ToolContext = ToolContext()
-    ) async throws -> Output {
-        try await call(input, in: context)
-    }
+extension FoundationModels.Tool where Arguments: Generable, Output: Generable {
+    public static var argumentsSchema: GenerationSchema { Arguments.generationSchema }
+    public static var outputSchema: GenerationSchema { Output.generationSchema }
 
-    /// The provider-facing descriptor derived from the tool's static metadata.
-    public static var descriptor: ToolDescriptor {
+    /// Provider-facing descriptor derived from this tool's FoundationModels
+    /// metadata and the `GenerationSchema`s supplied by its types.
+    public var descriptor: ToolDescriptor {
         ToolDescriptor(
             name: name,
             description: description,
-            inputSchema: inputSchema.json,
-            outputSchema: outputSchema.json,
-            annotations: annotations,
-            inputExamples: inputExamples
+            argumentsSchema: parameters,
+            outputSchema: Self.outputSchema,
+            annotations: (self as? any ToolMetadataProviding)?.annotations,
+            argumentExamples: (self as? any ToolMetadataProviding)?.argumentExamples
         )
+    }
+
+    /// Callable shorthand matching Swift's call-as-function convention.
+    public func callAsFunction(_ arguments: Arguments) async throws -> Output {
+        try await call(arguments: arguments)
     }
 }
 
@@ -163,15 +152,15 @@ public struct GenericToolError: ToolError {
 }
 
 /// A parsed request from the model to call a tool.
-public struct ToolCall: Sendable, Hashable, Codable {
+public struct ToolCall: Sendable, Equatable {
     public var id: String?
     public var name: String
-    public var input: JSONValue
+    public var arguments: GeneratedContent
 
-    public init(id: String? = nil, name: String, input: JSONValue) {
+    public init(id: String? = nil, name: String, arguments: GeneratedContent) {
         self.id = id
         self.name = name
-        self.input = input
+        self.arguments = arguments
     }
 }
 
@@ -179,5 +168,4 @@ public struct ToolCall: Sendable, Hashable, Codable {
 public enum ToolRegistryError: Error, Sendable {
     case notRegistered(String)
     case decodingFailed(name: String, detail: String)
-    case encodingFailed(name: String, detail: String)
 }

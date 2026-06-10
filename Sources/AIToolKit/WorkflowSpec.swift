@@ -1,9 +1,10 @@
 import Foundation
+import FoundationModels
 
 /// One-shot workflow IR for edge execution. The model emits one
 /// `WorkflowSpec`, then the runtime validates and executes the DAG locally
 /// without asking the model to observe intermediate tool outputs.
-public struct WorkflowSpec: Sendable, Codable, Hashable {
+public struct WorkflowSpec: Sendable, Equatable {
     public static let schemaVersion = "workflow.v1"
     public static let toolName = "workflow_run"
 
@@ -14,7 +15,7 @@ public struct WorkflowSpec: Sendable, Codable, Hashable {
     public var nodes: [WorkflowNode]
     public var final: WorkflowFinal
     public var limits: WorkflowLimits
-    public var metadata: [String: JSONValue]
+    public var metadata: [String: GeneratedContent]
 
     public init(
         schemaVersion: String = Self.schemaVersion,
@@ -24,7 +25,7 @@ public struct WorkflowSpec: Sendable, Codable, Hashable {
         nodes: [WorkflowNode],
         final: WorkflowFinal,
         limits: WorkflowLimits = .default,
-        metadata: [String: JSONValue] = [:]
+        metadata: [String: GeneratedContent] = [:]
     ) {
         self.schemaVersion = schemaVersion
         self.workflowID = workflowID
@@ -36,30 +37,23 @@ public struct WorkflowSpec: Sendable, Codable, Hashable {
         self.metadata = metadata
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case schemaVersion = "schema_version"
-        case workflowID = "workflow_id"
-        case intent, mode, nodes, final, limits, metadata
-    }
-
     /// Lenient decoder: only `nodes` is required. Every other field falls back
     /// to a sane default so a model can emit a *minimal* spec (just the node
     /// list) and the runtime fills the rest. This is what lets the lean schema
     /// / minimal example cut output tokens — the synthesized decoder would
     /// otherwise demand every field. Full specs still decode unchanged.
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? Self.schemaVersion
-        self.workflowID = try c.decodeIfPresent(String.self, forKey: .workflowID) ?? "wf"
-        self.intent = try c.decodeIfPresent(String.self, forKey: .intent) ?? ""
-        self.mode = try c.decodeIfPresent(WorkflowMode.self, forKey: .mode) ?? .execute
-        self.nodes = try c.decodeIfPresent([WorkflowNode].self, forKey: .nodes) ?? []
-        self.limits = try c.decodeIfPresent(WorkflowLimits.self, forKey: .limits) ?? .default
-        self.metadata = try c.decodeIfPresent([String: JSONValue].self, forKey: .metadata) ?? [:]
+    public init(_ content: GeneratedContent) throws {
+        self.schemaVersion = content.optionalString("schema_version") ?? Self.schemaVersion
+        self.workflowID = content.optionalString("workflow_id") ?? "wf"
+        self.intent = content.optionalString("intent") ?? ""
+        self.mode = content.optionalString("mode").flatMap(WorkflowMode.init(rawValue:)) ?? .execute
+        self.nodes = try content.contentArray("nodes")?.map(WorkflowNode.init) ?? []
+        self.limits = try content.property("limits").map(WorkflowLimits.init) ?? .default
+        self.metadata = try content.contentObject("metadata") ?? [:]
         // `final` defaults to the last node's output (or an empty message for
         // an empty plan) so a spec that omits it still validates and renders.
-        if let f = try c.decodeIfPresent(WorkflowFinal.self, forKey: .final) {
-            self.final = f
+        if let finalContent = content.property("final") {
+            self.final = try WorkflowFinal(finalContent)
         } else if let last = self.nodes.last {
             self.final = .nodeOutput(last.id)
         } else {
@@ -67,15 +61,15 @@ public struct WorkflowSpec: Sendable, Codable, Hashable {
         }
     }
 
-    public static func decodeToolCallInput(_ input: JSONValue) throws -> WorkflowSpec {
-        let value: JSONValue
-        if case .object(let object) = input,
+    public static func decodeToolCallArguments(_ arguments: GeneratedContent) throws -> WorkflowSpec {
+        let value: GeneratedContent
+        if case .structure(let object, _) = arguments.kind,
            let wrapped = object["spec"] ?? object["workflow"] {
             value = wrapped
         } else {
-            value = input
+            value = arguments
         }
-        return try JSONDecoder().decode(WorkflowSpec.self, from: value.data())
+        return try WorkflowSpec(value)
     }
 }
 
@@ -90,12 +84,12 @@ public enum WorkflowNodeKind: String, Sendable, Codable, Hashable {
     case tool
 }
 
-public struct WorkflowNode: Sendable, Codable, Hashable, Identifiable {
+public struct WorkflowNode: Sendable, Equatable, Identifiable {
     public var id: String
     public var kind: WorkflowNodeKind
     public var tool: String?
     public var dependsOn: [String]
-    public var input: JSONValue
+    public var input: GeneratedContent
     public var policy: WorkflowNodePolicy
     public var outputPolicy: WorkflowOutputPolicy
 
@@ -104,7 +98,7 @@ public struct WorkflowNode: Sendable, Codable, Hashable, Identifiable {
         kind: WorkflowNodeKind = .tool,
         tool: String?,
         dependsOn: [String] = [],
-        input: JSONValue = .object([:]),
+        input: GeneratedContent = .object([:]),
         policy: WorkflowNodePolicy = .default,
         outputPolicy: WorkflowOutputPolicy = .default
     ) {
@@ -117,27 +111,19 @@ public struct WorkflowNode: Sendable, Codable, Hashable, Identifiable {
         self.outputPolicy = outputPolicy
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case id, kind, tool
-        case dependsOn = "depends_on"
-        case input, policy
-        case outputPolicy = "output_policy"
-    }
-
     /// Lenient decoder: only `id` is required. `tool` may be absent (validated
     /// later), `depends_on` defaults to [] (dependencies are also derived from
     /// `$ref`s in `input`), and `policy`/`output_policy` default — so a node
     /// can be just `{id, tool, input}`.
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try c.decode(String.self, forKey: .id)
-        self.kind = try c.decodeIfPresent(WorkflowNodeKind.self, forKey: .kind) ?? .tool
-        self.tool = try c.decodeIfPresent(String.self, forKey: .tool)
-        self.dependsOn = try c.decodeIfPresent([String].self, forKey: .dependsOn) ?? []
-        let rawInput = try c.decodeIfPresent(JSONValue.self, forKey: .input) ?? .object([:])
+    public init(_ content: GeneratedContent) throws {
+        self.id = try content.requiredString("id")
+        self.kind = content.optionalString("kind").flatMap(WorkflowNodeKind.init(rawValue:)) ?? .tool
+        self.tool = content.optionalString("tool")
+        self.dependsOn = try content.contentArray("depends_on")?.compactMap(\.stringValue) ?? []
+        let rawInput = content.property("input") ?? .object([:])
         self.input = Self.sanitizedInput(rawInput)
-        self.policy = try c.decodeIfPresent(WorkflowNodePolicy.self, forKey: .policy) ?? .default
-        self.outputPolicy = try c.decodeIfPresent(WorkflowOutputPolicy.self, forKey: .outputPolicy) ?? .default
+        self.policy = try content.property("policy").map(WorkflowNodePolicy.init) ?? .default
+        self.outputPolicy = try content.property("output_policy").map(WorkflowOutputPolicy.init) ?? .default
     }
 
     /// Node-level field names a model must NOT place inside `input` — but
@@ -156,8 +142,8 @@ public struct WorkflowNode: Sendable, Codable, Hashable, Identifiable {
     ///   the tool sees only its own parameters.
     /// Tool parameters in practice never use these structural names, so this
     /// is safe and turns a common malformed-plan failure into a success.
-    private static func sanitizedInput(_ value: JSONValue) -> JSONValue {
-        guard case .object(var object) = value else {
+    private static func sanitizedInput(_ value: GeneratedContent) -> GeneratedContent {
+        guard case .structure(var object, _) = value.kind else {
             return .object([:])
         }
         for key in reservedInputKeys { object.removeValue(forKey: key) }
@@ -165,7 +151,7 @@ public struct WorkflowNode: Sendable, Codable, Hashable, Identifiable {
     }
 }
 
-public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
+public struct WorkflowNodePolicy: Sendable, Equatable {
     public static let defaultTimeoutMS = 20_000
 
     public enum OnError: String, Sendable, Codable, Hashable {
@@ -178,13 +164,13 @@ public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
     public var timeoutMS: Int
     public var retry: WorkflowRetryPolicy
     public var onError: OnError
-    public var defaultOutput: JSONValue?
+    public var defaultOutput: GeneratedContent?
 
     public init(
         timeoutMS: Int = Self.defaultTimeoutMS,
         retry: WorkflowRetryPolicy = .default,
         onError: OnError = .abort,
-        defaultOutput: JSONValue? = nil
+        defaultOutput: GeneratedContent? = nil
     ) {
         self.timeoutMS = timeoutMS
         self.retry = retry
@@ -194,19 +180,11 @@ public struct WorkflowNodePolicy: Sendable, Codable, Hashable {
 
     public static let `default` = WorkflowNodePolicy()
 
-    private enum CodingKeys: String, CodingKey {
-        case timeoutMS = "timeout_ms"
-        case retry
-        case onError = "on_error"
-        case defaultOutput = "default_output"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.timeoutMS = try c.decodeIfPresent(Int.self, forKey: .timeoutMS) ?? Self.defaultTimeoutMS
-        self.retry = try c.decodeIfPresent(WorkflowRetryPolicy.self, forKey: .retry) ?? .default
-        self.onError = try c.decodeIfPresent(OnError.self, forKey: .onError) ?? .abort
-        self.defaultOutput = try c.decodeIfPresent(JSONValue.self, forKey: .defaultOutput)
+    public init(_ content: GeneratedContent) throws {
+        self.timeoutMS = content.optionalInt("timeout_ms") ?? Self.defaultTimeoutMS
+        self.retry = try content.property("retry").map(WorkflowRetryPolicy.init) ?? .default
+        self.onError = content.optionalString("on_error").flatMap(OnError.init(rawValue:)) ?? .abort
+        self.defaultOutput = content.property("default_output")
     }
 }
 
@@ -238,6 +216,13 @@ public struct WorkflowRetryPolicy: Sendable, Codable, Hashable {
         self.maxAttempts = try c.decodeIfPresent(Int.self, forKey: .maxAttempts) ?? 1
         self.backoffMS = try c.decodeIfPresent(Int.self, forKey: .backoffMS) ?? 0
         self.retryOnlyIfToolErrorIsRetriable = try c.decodeIfPresent(Bool.self, forKey: .retryOnlyIfToolErrorIsRetriable) ?? true
+    }
+
+    public init(_ content: GeneratedContent) throws {
+        self.maxAttempts = content.optionalInt("max_attempts") ?? 1
+        self.backoffMS = content.optionalInt("backoff_ms") ?? 0
+        self.retryOnlyIfToolErrorIsRetriable =
+            content.optionalBool("retry_only_if_tool_error_is_retriable") ?? true
     }
 }
 
@@ -280,6 +265,13 @@ public struct WorkflowOutputPolicy: Sendable, Codable, Hashable {
         self.maxBytes = try c.decodeIfPresent(Int.self, forKey: .maxBytes) ?? 65_536
         self.redaction = try c.decodeIfPresent(Redaction.self, forKey: .redaction) ?? .toolDefault
     }
+
+    public init(_ content: GeneratedContent) throws {
+        self.store = content.optionalBool("store") ?? true
+        self.exposeToFinal = content.optionalBool("expose_to_final") ?? true
+        self.maxBytes = content.optionalInt("max_bytes") ?? 65_536
+        self.redaction = content.optionalString("redaction").flatMap(Redaction.init(rawValue:)) ?? .toolDefault
+    }
 }
 
 public struct WorkflowLimits: Sendable, Codable, Hashable {
@@ -316,9 +308,16 @@ public struct WorkflowLimits: Sendable, Codable, Hashable {
         self.deadlineMS = try c.decodeIfPresent(Int.self, forKey: .deadlineMS) ?? 15_000
         self.maxOutputBytesPerNode = try c.decodeIfPresent(Int.self, forKey: .maxOutputBytesPerNode) ?? 65_536
     }
+
+    public init(_ content: GeneratedContent) throws {
+        self.maxNodes = content.optionalInt("max_nodes") ?? 12
+        self.maxParallelism = content.optionalInt("max_parallelism") ?? 4
+        self.deadlineMS = content.optionalInt("deadline_ms") ?? 15_000
+        self.maxOutputBytesPerNode = content.optionalInt("max_output_bytes_per_node") ?? 65_536
+    }
 }
 
-public struct WorkflowFinal: Sendable, Codable, Hashable {
+public struct WorkflowFinal: Sendable, Equatable {
     public enum Kind: String, Sendable, Codable, Hashable {
         case value
         case template
@@ -327,18 +326,18 @@ public struct WorkflowFinal: Sendable, Codable, Hashable {
     }
 
     public var kind: Kind
-    public var value: JSONValue?
+    public var value: GeneratedContent?
     public var template: String?
-    public var bindings: [String: JSONValue]
+    public var bindings: [String: GeneratedContent]
     public var node: String?
     public var path: String?
     public var message: String?
 
     public init(
         kind: Kind,
-        value: JSONValue? = nil,
+        value: GeneratedContent? = nil,
         template: String? = nil,
-        bindings: [String: JSONValue] = [:],
+        bindings: [String: GeneratedContent] = [:],
         node: String? = nil,
         path: String? = nil,
         message: String? = nil
@@ -360,19 +359,14 @@ public struct WorkflowFinal: Sendable, Codable, Hashable {
         WorkflowFinal(kind: .message, message: text)
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case kind, value, template, bindings, node, path, message
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.kind = try c.decodeIfPresent(Kind.self, forKey: .kind) ?? .message
-        self.value = try c.decodeIfPresent(JSONValue.self, forKey: .value)
-        self.template = try c.decodeIfPresent(String.self, forKey: .template)
-        self.bindings = try c.decodeIfPresent([String: JSONValue].self, forKey: .bindings) ?? [:]
-        self.node = try c.decodeIfPresent(String.self, forKey: .node)
-        self.path = try c.decodeIfPresent(String.self, forKey: .path)
-        self.message = try c.decodeIfPresent(String.self, forKey: .message)
+    public init(_ content: GeneratedContent) throws {
+        self.kind = content.optionalString("kind").flatMap(Kind.init(rawValue:)) ?? .message
+        self.value = content.property("value")
+        self.template = content.optionalString("template")
+        self.bindings = try content.contentObject("bindings") ?? [:]
+        self.node = content.optionalString("node")
+        self.path = content.optionalString("path")
+        self.message = content.optionalString("message")
     }
 }
 

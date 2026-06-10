@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import SwiftUI
 
 /// Process-wide registry for `ViewTool`s. Parallels `ToolRegistry` but its
@@ -21,21 +22,23 @@ public final class ViewToolRegistry {
 
     public init() {}
 
-    public func register<T: ViewTool>(_ tool: T) {
-        let descriptor = T.descriptor
-        let name = T.name
+    public func register<T: ViewTool>(_ tool: T) where T.Arguments: Generable {
+        let descriptor = tool.descriptor
+        let name = tool.name
         entries[name] = Entry(descriptor: descriptor) { data, context in
-            let decoder = JSONDecoder()
-            let input: T.Input
+            let arguments: T.Arguments
             do {
-                input = try decoder.decode(T.Input.self, from: data)
+                let content = try GeneratedContent(
+                    json: String(decoding: data, as: UTF8.self)
+                )
+                arguments = try T.Arguments(content)
             } catch {
                 throw ToolRegistryError.decodingFailed(
                     name: name,
                     detail: String(describing: error)
                 )
             }
-            let view = try await tool.call(input, in: context)
+            let view = try await tool.call(arguments: arguments, in: context)
             return AnyView(view)
         }
     }
@@ -58,16 +61,16 @@ public final class ViewToolRegistry {
         names.compactMap { entries[$0]?.descriptor }.sorted { $0.name < $1.name }
     }
 
-    /// Dispatch a call by name; decode the JSON input, run the tool,
+    /// Dispatch a call by name; decode the JSON arguments, run the tool,
     /// erase the resulting view to `AnyView`.
     public func call(
         name: String,
-        jsonInput: Data,
+        jsonArguments: Data,
         context: ToolContext
     ) async throws -> AnyView {
         guard let entry = entries[name] else {
             throw ToolRegistryError.notRegistered(name)
         }
-        return try await entry.call(jsonInput, context)
+        return try await entry.call(jsonArguments, context)
     }
 }

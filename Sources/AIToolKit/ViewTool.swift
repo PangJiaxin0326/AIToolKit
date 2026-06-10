@@ -1,3 +1,4 @@
+import FoundationModels
 import SwiftUI
 
 /// A typed, declarative *view-producing* tool the LLM can call.
@@ -9,47 +10,51 @@ import SwiftUI
 ///
 /// Mental model: the LLM acts as a **UI router** (picks which `ViewTool` to
 /// call) and a **model picker** (decides what data to feed it). The tool's
-/// `Input` typically carries a model selector (e.g. `"contacts"`) plus
+/// `Arguments` typically carry a model selector (e.g. `"contacts"`) plus
 /// view-specific configuration (sort order, column count, chart kind, ...).
 ///
-/// Why a separate protocol from `Tool`: `Tool.Output` must be `Codable &
-/// Sendable` so it can round-trip back to the model as text. A SwiftUI
+/// Why a separate protocol from `Tool`: `FoundationModels.Tool.Output` must be
+/// prompt-representable so it can round-trip back to the model. A SwiftUI
 /// `View` is neither, and is meaningless to round-trip — the host renders it.
 ///
-/// The interface follows Claude SDK / MCP naming: tools expose an
-/// `inputSchema` and are executed with `call(_:in:)`.
+/// The interface follows FoundationModels naming: tools expose `parameters`
+/// and are executed with `call(arguments:in:)`.
 public protocol ViewTool: Sendable {
-    associatedtype Input: Codable & Sendable
+    associatedtype Arguments: ConvertibleFromGeneratedContent
     associatedtype Body: View
 
-    static var name: String { get }
-    static var description: String { get }
-    static var inputSchema: ToolSchema { get }
+    var name: String { get }
+    var description: String { get }
+    var parameters: GenerationSchema { get }
 
-    /// Produce the view for the given input. Runs on the main actor because
+    /// Produce the view for the given arguments. Runs on the main actor because
     /// SwiftUI view construction is main-isolated.
     @MainActor
-    func call(_ input: Input, in context: ToolContext) async throws -> Body
+    func call(arguments: Arguments, in context: ToolContext) async throws -> Body
 }
 
 extension ViewTool {
     /// Callable shorthand for direct use outside a registry.
     @MainActor
     public func callAsFunction(
-        _ input: Input,
+        _ arguments: Arguments,
         in context: ToolContext = ToolContext()
     ) async throws -> Body {
-        try await call(input, in: context)
+        try await call(arguments: arguments, in: context)
     }
+}
+
+extension ViewTool where Arguments: Generable {
+    public var parameters: GenerationSchema { Arguments.generationSchema }
 
     /// Provider-facing descriptor derived from the tool's static metadata.
     /// Shares its shape with `Tool.descriptor` so a host can mix both
     /// families in one manifest sent to the model.
-    public static var descriptor: ToolDescriptor {
+    public var descriptor: ToolDescriptor {
         ToolDescriptor(
             name: name,
             description: description,
-            inputSchema: inputSchema.json
+            argumentsSchema: parameters
         )
     }
 }

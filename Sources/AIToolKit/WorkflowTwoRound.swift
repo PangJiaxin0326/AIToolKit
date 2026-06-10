@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 // MARK: - Two-round-trip workflow models & value algebra
 //
@@ -24,7 +25,7 @@ public enum WorkflowTwoRound {
 
 // MARK: Value algebra (the markers the runtime resolves into literals/$refs)
 
-/// Static helpers over a node-input `JSONValue` for the two-round markers:
+/// Static helpers over a node-input `GeneratedContent` for the two-round markers:
 ///
 /// - `{"$slot":"<id>"}` — Round-1 placeholder for a value from local context.
 /// - `{"$bind":"<candidate_id>"}` — Round-2 selection of a harvested candidate.
@@ -33,17 +34,17 @@ public enum WorkflowTwoRound {
 /// `$ref`/`$literal` continue to be handled by `WorkflowReferenceResolver`.
 public enum TwoRoundValue {
     /// Every `$slot` id referenced by a value.
-    public static func slotIDs(in value: JSONValue) -> [String] {
+    public static func slotIDs(in value: GeneratedContent) -> [String] {
         marker(value, key: "$slot")
     }
 
     /// Every `$bind` candidate id referenced by a value.
-    public static func bindIDs(in value: JSONValue) -> [String] {
+    public static func bindIDs(in value: GeneratedContent) -> [String] {
         marker(value, key: "$bind")
     }
 
     /// Node-output `$ref` source ids (for dependency edges / topo checks).
-    public static func nodeRefIDs(in value: JSONValue) -> [String] {
+    public static func nodeRefIDs(in value: GeneratedContent) -> [String] {
         WorkflowReferenceResolver.references(in: value)
             .filter { $0.source == .node }
             .compactMap(\.node)
@@ -51,10 +52,10 @@ public enum TwoRoundValue {
 
     private static let markerKeys: Set<String> = ["$ref", "$literal", "$slot", "$bind"]
 
-    private static func marker(_ value: JSONValue, key: String) -> [String] {
-        switch value {
-        case .object(let object):
-            if object.count == 1, case .string(let id)? = object[key] { return [id] }
+    private static func marker(_ value: GeneratedContent, key: String) -> [String] {
+        switch value.kind {
+        case .structure(let object, _):
+            if object.count == 1, case .string(let id)? = object[key]?.kind { return [id] }
             // A single-key object that is some *other* marker is a leaf, not a
             // container — don't descend into it.
             if object.count == 1, let only = object.keys.first, markerKeys.contains(only) {
@@ -63,7 +64,9 @@ public enum TwoRoundValue {
             return object.values.flatMap { marker($0, key: key) }
         case .array(let values):
             return values.flatMap { marker($0, key: key) }
-        default:
+        case .null, .bool, .number, .string:
+            return []
+        @unknown default:
             return []
         }
     }
@@ -71,49 +74,53 @@ public enum TwoRoundValue {
     /// Replaces every `{"$slot":"id"}` with `resolve(id)`. Leaves
     /// `$ref`/`$bind`/`$literal`/scalars intact.
     public static func resolveSlots(
-        in value: JSONValue, resolve: (String) -> JSONValue
-    ) -> JSONValue {
+        in value: GeneratedContent, resolve: (String) -> GeneratedContent
+    ) -> GeneratedContent {
         replaceMarker(value, key: "$slot") { resolve($0) }
     }
 
     /// Replaces every `{"$bind":"id"}` with the literal `resolve` returns; throws
     /// if a referenced candidate can't be resolved.
     public static func resolveBinds(
-        in value: JSONValue, resolve: (String) throws -> JSONValue
-    ) rethrows -> JSONValue {
+        in value: GeneratedContent, resolve: (String) throws -> GeneratedContent
+    ) rethrows -> GeneratedContent {
         try replaceMarkerThrowing(value, key: "$bind", resolve)
     }
 
     private static func replaceMarker(
-        _ value: JSONValue, key: String, _ resolve: (String) -> JSONValue
-    ) -> JSONValue {
-        switch value {
-        case .object(let object):
-            if object.count == 1, case .string(let id)? = object[key] { return resolve(id) }
+        _ value: GeneratedContent, key: String, _ resolve: (String) -> GeneratedContent
+    ) -> GeneratedContent {
+        switch value.kind {
+        case .structure(let object, _):
+            if object.count == 1, case .string(let id)? = object[key]?.kind { return resolve(id) }
             if object.count == 1, (object["$ref"] != nil || object["$literal"] != nil
                 || object["$slot"] != nil || object["$bind"] != nil) { return value }
             return .object(object.mapValues { replaceMarker($0, key: key, resolve) })
         case .array(let values):
             return .array(values.map { replaceMarker($0, key: key, resolve) })
-        default:
+        case .null, .bool, .number, .string:
+            return value
+        @unknown default:
             return value
         }
     }
 
     private static func replaceMarkerThrowing(
-        _ value: JSONValue, key: String, _ resolve: (String) throws -> JSONValue
-    ) rethrows -> JSONValue {
-        switch value {
-        case .object(let object):
-            if object.count == 1, case .string(let id)? = object[key] { return try resolve(id) }
+        _ value: GeneratedContent, key: String, _ resolve: (String) throws -> GeneratedContent
+    ) rethrows -> GeneratedContent {
+        switch value.kind {
+        case .structure(let object, _):
+            if object.count == 1, case .string(let id)? = object[key]?.kind { return try resolve(id) }
             if object.count == 1, (object["$ref"] != nil || object["$literal"] != nil
                 || object["$slot"] != nil || object["$bind"] != nil) { return value }
-            var out: [String: JSONValue] = [:]
+            var out: [String: GeneratedContent] = [:]
             for (k, child) in object { out[k] = try replaceMarkerThrowing(child, key: key, resolve) }
             return .object(out)
         case .array(let values):
             return .array(try values.map { try replaceMarkerThrowing($0, key: key, resolve) })
-        default:
+        case .null, .bool, .number, .string:
+            return value
+        @unknown default:
             return value
         }
     }
@@ -121,14 +128,15 @@ public enum TwoRoundValue {
     // MARK: `{{slot_id}}` label tokens
 
     /// Every `{{slot_id}}` token referenced anywhere in a value's strings.
-    public static func labelTokens(in value: JSONValue) -> Set<String> {
+    public static func labelTokens(in value: GeneratedContent) -> Set<String> {
         var out: Set<String> = []
-        func walk(_ v: JSONValue) {
-            switch v {
+        func walk(_ v: GeneratedContent) {
+            switch v.kind {
             case .string(let s): out.formUnion(tokenIDs(in: s))
             case .array(let a): a.forEach(walk)
-            case .object(let o): o.values.forEach(walk)
-            default: break
+            case .structure(let o, _): o.values.forEach(walk)
+            case .null, .bool, .number: break
+            @unknown default: break
             }
         }
         walk(value)
@@ -138,26 +146,15 @@ public enum TwoRoundValue {
     /// Replaces each `{{slot_id}}` token in every string with `label(id)`; a
     /// token whose id has no label is left intact.
     public static func resolveLabels(
-        in value: JSONValue, label: (String) -> String?
-    ) -> JSONValue {
-        switch value {
+        in value: GeneratedContent, label: (String) -> String?
+    ) -> GeneratedContent {
+        switch value.kind {
         case .string(let s): return .string(substitute(s, label: label))
         case .array(let a): return .array(a.map { resolveLabels(in: $0, label: label) })
-        case .object(let o): return .object(o.mapValues { resolveLabels(in: $0, label: label) })
-        default: return value
+        case .structure(let o, _): return .object(o.mapValues { resolveLabels(in: $0, label: label) })
+        case .null, .bool, .number: return value
+        @unknown default: return value
         }
-    }
-
-    /// Drops top-level input keys not declared in the tool's input-schema
-    /// `properties`. Recovers a strict-input node from a leaked extra key (the
-    /// model occasionally adds one). No-op on a non-strict / propertiless schema.
-    public static func prune(_ value: JSONValue, toInputSchema schema: JSONValue) -> JSONValue {
-        guard case .object(let object) = value,
-              case .object(let schemaObject) = schema,
-              case .object(let properties)? = schemaObject["properties"]
-        else { return value }
-        let allowed = Set(properties.keys)
-        return .object(object.filter { allowed.contains($0.key) })
     }
 
     static func tokenIDs(in s: String) -> [String] {
@@ -198,30 +195,28 @@ public enum TwoRoundValue {
 /// input hygiene as `WorkflowNode` (null → `{}`, strip leaked node-structural
 /// keys), so a model emitting `"input": null` or echoing `id`/`tool` into
 /// `input` doesn't break the node.
-public struct WorkflowPlanNode: Sendable, Hashable, Codable {
+public struct WorkflowPlanNode: Sendable, Equatable {
     public var id: String
     public var tool: String?
-    public var input: JSONValue
+    public var input: GeneratedContent
 
-    public init(id: String, tool: String?, input: JSONValue) {
+    public init(id: String, tool: String?, input: GeneratedContent) {
         self.id = id
         self.tool = tool
         self.input = input
     }
 
-    private enum CodingKeys: String, CodingKey { case id, tool, input }
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try c.decode(String.self, forKey: .id)
-        self.tool = try c.decodeIfPresent(String.self, forKey: .tool)
-        let raw = try c.decodeIfPresent(JSONValue.self, forKey: .input) ?? .object([:])
+    public init(_ content: GeneratedContent) throws {
+        self.id = try content.requiredString("id")
+        self.tool = content.optionalString("tool")
+        let raw = content.property("input") ?? .object([:])
         self.input = Self.sanitized(raw)
     }
     private static let reserved: Set<String> = [
         "id", "kind", "tool", "depends_on", "policy", "output_policy",
     ]
-    private static func sanitized(_ value: JSONValue) -> JSONValue {
-        guard case .object(var object) = value else { return .object([:]) }
+    private static func sanitized(_ value: GeneratedContent) -> GeneratedContent {
+        guard case .structure(var object, _) = value.kind else { return .object([:]) }
         for key in reserved { object.removeValue(forKey: key) }
         return .object(object)
     }
@@ -255,9 +250,16 @@ public struct WorkflowContextSlot: Sendable, Hashable, Codable {
         self.reason = try c.decodeIfPresent(String.self, forKey: .reason) ?? ""
         self.required = try c.decodeIfPresent(Bool.self, forKey: .required) ?? true
     }
+
+    public init(_ content: GeneratedContent) throws {
+        self.slotID = try content.requiredString("slot_id")
+        self.source = try content.requiredString("source")
+        self.reason = content.optionalString("reason") ?? ""
+        self.required = content.optionalBool("required") ?? true
+    }
 }
 
-public struct WorkflowPlan: Sendable, Hashable, Codable {
+public struct WorkflowPlan: Sendable, Equatable {
     public enum Outcome: String, Sendable, Hashable, Codable {
         case selfContained = "self_contained"
         case requiresBinding = "requires_binding"
@@ -290,23 +292,13 @@ public struct WorkflowPlan: Sendable, Hashable, Codable {
         self.message = message
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case schemaVersion = "schema_version"
-        case outcome
-        case intentSummary = "intent_summary"
-        case nodes
-        case contextSlots = "context_slots"
-        case message
-    }
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion)
-            ?? WorkflowTwoRound.schemaVersion
-        self.outcome = try c.decodeIfPresent(Outcome.self, forKey: .outcome) ?? .requiresBinding
-        self.intentSummary = try c.decodeIfPresent(String.self, forKey: .intentSummary) ?? ""
-        self.nodes = try c.decodeIfPresent([WorkflowPlanNode].self, forKey: .nodes) ?? []
-        self.contextSlots = try c.decodeIfPresent([WorkflowContextSlot].self, forKey: .contextSlots) ?? []
-        self.message = try c.decodeIfPresent(String.self, forKey: .message)
+    public init(_ content: GeneratedContent) throws {
+        self.schemaVersion = content.optionalString("schema_version") ?? WorkflowTwoRound.schemaVersion
+        self.outcome = content.optionalString("outcome").flatMap(Outcome.init(rawValue:)) ?? .requiresBinding
+        self.intentSummary = content.optionalString("intent_summary") ?? ""
+        self.nodes = try content.contentArray("nodes")?.map(WorkflowPlanNode.init) ?? []
+        self.contextSlots = try content.contentArray("context_slots")?.map(WorkflowContextSlot.init) ?? []
+        self.message = content.optionalString("message")
     }
 
     /// Effective outcome derived from *structure* rather than the label: a plan
@@ -326,14 +318,14 @@ public struct WorkflowPlan: Sendable, Hashable, Codable {
 
 // MARK: Harvest packet
 
-public struct HarvestedCandidate: Sendable, Hashable {
+public struct HarvestedCandidate: Sendable, Equatable {
     public let candidateID: String
     public let label: String
     public let kind: String
-    public let value: JSONValue
+    public let value: GeneratedContent
     public let isCurrent: Bool
 
-    public init(candidateID: String, label: String, kind: String, value: JSONValue, isCurrent: Bool) {
+    public init(candidateID: String, label: String, kind: String, value: GeneratedContent, isCurrent: Bool) {
         self.candidateID = candidateID
         self.label = label
         self.kind = kind
@@ -349,7 +341,7 @@ public struct HarvestedCandidate: Sendable, Hashable {
     }
 }
 
-public struct HarvestedSlot: Sendable, Hashable {
+public struct HarvestedSlot: Sendable, Equatable {
     public enum Status: String, Sendable, Hashable { case resolved, missing }
     public let slotID: String
     public let source: String
@@ -366,7 +358,7 @@ public struct HarvestedSlot: Sendable, Hashable {
     }
 }
 
-public struct ContextPacket: Sendable, Hashable {
+public struct ContextPacket: Sendable, Equatable {
     public var slots: [HarvestedSlot]
     public init(slots: [HarvestedSlot]) { self.slots = slots }
 
@@ -412,7 +404,7 @@ public protocol ContextHarvesting: Sendable {
 
 // MARK: Round-2 binding
 
-public struct WorkflowBinding: Sendable, Hashable, Codable {
+public struct WorkflowBinding: Sendable, Equatable {
     public enum Status: String, Sendable, Hashable, Codable {
         case complete
         case cannotBind = "cannot_bind"
@@ -429,18 +421,11 @@ public struct WorkflowBinding: Sendable, Hashable, Codable {
         self.message = message
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case status = "binding_status"
-        case nodes
-        case missingSlots = "missing_slots"
-        case message
-    }
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.status = try c.decodeIfPresent(Status.self, forKey: .status) ?? .complete
-        self.nodes = try c.decodeIfPresent([WorkflowPlanNode].self, forKey: .nodes) ?? []
-        self.missingSlots = try c.decodeIfPresent([String].self, forKey: .missingSlots) ?? []
-        self.message = try c.decodeIfPresent(String.self, forKey: .message)
+    public init(_ content: GeneratedContent) throws {
+        self.status = content.optionalString("binding_status").flatMap(Status.init(rawValue:)) ?? .complete
+        self.nodes = try content.contentArray("nodes")?.map(WorkflowPlanNode.init) ?? []
+        self.missingSlots = try content.contentArray("missing_slots")?.compactMap(\.stringValue) ?? []
+        self.message = content.optionalString("message")
     }
 }
 

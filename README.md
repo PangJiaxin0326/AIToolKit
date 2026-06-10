@@ -1,21 +1,20 @@
 # AIToolKit
 
-The tool-calling standard for Swift LLM apps. AIToolKit defines a typed,
-declarative `Tool` protocol and a process-wide `ToolRegistry` so any Swift
-package can ship tools an LLM can call — without depending on a particular
-runtime or provider.
+The tool-calling support package for Swift LLM apps. AIToolKit builds on
+FoundationModels' official `Tool` protocol and provides a process-wide
+`ToolRegistry` so Swift packages can ship tools an LLM can call.
 
 It has no third-party dependencies, is fully `Sendable`, and builds under
 Swift 6 strict concurrency / language mode v6.
 
 ## What's inside
 
-- `Tool` — a typed unit of work (`Input`/`Output` are `Codable & Sendable`).
-- `ToolContext` — small ambient state handed to a tool at invocation.
+- `Tool` — FoundationModels' typed unit of work (`Arguments` / `Output`).
+- `ToolContext` — small ambient state used by workflow and view-tool dispatch.
 - `ToolRegistry` — an actor that registers, subsets, and dispatches tools by name.
-- `ToolSchema` / `ToolDescriptor` — JSON Schema builder and the provider-facing
-  descriptor sent to the model.
-- `JSONValue` — a `Sendable`, `Codable`, numerically-canonical JSON value.
+- `ToolDescriptor` — provider-facing metadata backed by `GenerationSchema`.
+- `GeneratedContent` — FoundationModels' local content value for arguments,
+  outputs, workflow inputs, and workflow results.
 - `ToolError` / `ToolRegistryError` — typed errors with retriability.
 
 ## Installation
@@ -43,20 +42,20 @@ Then add `AIToolKit` to your target's dependencies:
 
 ```swift
 import AIToolKit
+import FoundationModels
 
 struct EchoTool: Tool {
-    struct Input: Codable, Sendable { var text: String }
-    struct Output: Codable, Sendable { var echoed: String }
+    @Generable
+    struct Arguments { var text: String }
 
-    static let name = "echo"
-    static let description = "Echoes input back."
-    static let inputSchema = ToolSchema.object(
-        properties: ["text": .string(description: "anything")],
-        required: ["text"]
-    )
+    @Generable
+    struct Output { var echoed: String }
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
-        Output(echoed: input.text)
+    let name = "echo"
+    let description = "Echoes input back."
+
+    func call(arguments: Arguments) async throws -> Output {
+        Output(echoed: arguments.text)
     }
 }
 
@@ -64,7 +63,7 @@ let registry = ToolRegistry()
 await registry.register(EchoTool())
 ```
 
-Tools can also be called directly with `try await tool(input, in: context)`.
+Tools can also be called directly with `try await tool(arguments)`.
 
 ## Workflows and two-round-trip APIs
 
@@ -74,7 +73,7 @@ validates and executes it locally without re-calling the model:
 
 - `WorkflowSpec` / `WorkflowNode` — the lean IR (`{id, tool, input}` per node;
   every other field defaults).
-- `WorkflowValidator` — graph shape, tool availability, schema, and limit checks.
+- `WorkflowValidator` — graph shape, tool availability, JSON Pointer syntax, and limit checks.
 - `WorkflowExecutor` — topological, parallel-where-safe execution via `ToolRegistry`.
 - `WorkflowReferenceResolver` — resolves `$ref`/`$literal` values (node, context, user_input).
 - `WorkflowSchema` / `WorkflowPromptBuilder` — strict schemas + planning prompts.

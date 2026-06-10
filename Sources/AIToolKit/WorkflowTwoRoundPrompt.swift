@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 /// Versioned planner/binder instructions for the two-round-trip compiler.
 /// Prompts are product assets: version them and re-run golden traces when they
@@ -130,13 +131,15 @@ public enum WorkflowTwoRoundPrompt {
 
     // MARK: Shared
 
-    /// One compact line per tool: name, description, input schema, output
+    /// One compact line per tool: name, description, arguments schema, output
     /// schema, side effect -- the manifest both rounds render.
     public static func renderManifest(_ descriptors: [ToolDescriptor]) -> String {
         descriptors.sorted { $0.name < $1.name }.map { descriptor in
             var line = "- \(descriptor.name): \(descriptor.description)"
-            if let text = jsonString(descriptor.inputSchema) { line += " Input schema: \(text)" }
-            if let output = descriptor.outputSchema, let text = jsonString(output) {
+            if let text = try? descriptor.argumentsSchema.jsonString() {
+                line += " Arguments schema: \(text)"
+            }
+            if let output = descriptor.outputSchema, let text = try? output.jsonString() {
                 line += " Output schema: \(text)"
             }
             if let annotations = descriptor.annotations {
@@ -149,7 +152,7 @@ public enum WorkflowTwoRoundPrompt {
     /// Renders the validated plan node list for the Binder prompt.
     public static func renderPlanNodes(_ nodes: [WorkflowPlanNode]) -> String {
         nodes.map { node in
-            let value = JSONValue.object([
+            let value = GeneratedContent.object([
                 "id": .string(node.id),
                 "tool": .string(node.tool ?? ""),
                 "input": node.input,
@@ -158,8 +161,7 @@ public enum WorkflowTwoRoundPrompt {
         }.joined(separator: "\n")
     }
 
-    private static func jsonString(_ value: JSONValue) -> String? {
-        guard let data = try? value.data() else { return nil }
-        return String(data: data, encoding: .utf8)
+    private static func jsonString(_ value: GeneratedContent) -> String? {
+        value.jsonString
     }
 }

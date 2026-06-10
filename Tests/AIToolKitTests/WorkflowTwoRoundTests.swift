@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import Testing
 @testable import AIToolKit
 
@@ -36,15 +37,11 @@ struct WorkflowTwoRoundTests {
         return ContextPacket(slots: slots)
     }
 
-    private let sendSchema = ToolSchema.strictObject(
-        properties: ["contactID": .string, "body": .string],
-        required: ["contactID", "body"]).json
-
     // MARK: value algebra
 
     @Test func slotAndBindAndLabelDetection() {
-        let input: JSONValue = .object([
-            "contactID": .object(["$slot": "current_contact"]),
+        let input: GeneratedContent = .object([
+            "contactID": .object(["$slot": .string("current_contact")]),
             "body": .string("Reminder about {{foreground_document}}."),
         ])
         #expect(TwoRoundValue.slotIDs(in: input) == ["current_contact"])
@@ -53,17 +50,9 @@ struct WorkflowTwoRoundTests {
     }
 
     @Test func resolveLabelsSubstitutesAndLeavesUnknown() {
-        let v: JSONValue = .string("A {{doc}} and {{missing}}")
+        let v: GeneratedContent = .string("A {{doc}} and {{missing}}")
         let out = TwoRoundValue.resolveLabels(in: v) { $0 == "doc" ? "Memo" : nil }
         #expect(out == .string("A Memo and {{missing}}"))
-    }
-
-    @Test func pruneDropsStrayKeys() {
-        let input: JSONValue = .object([
-            "contactID": .string("c1"), "body": .string("hi"), "message": .string("leak"),
-        ])
-        let pruned = TwoRoundValue.prune(input, toInputSchema: sendSchema)
-        #expect(pruned == .object(["contactID": .string("c1"), "body": .string("hi")]))
     }
 
     // MARK: plan validation
@@ -74,7 +63,7 @@ struct WorkflowTwoRoundTests {
         let plan = WorkflowPlan(
             outcome: .requiresBinding, nodes: [
                 WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                    "contactID": .object(["$slot": "current_contact"]),
+                    "contactID": .object(["$slot": .string("current_contact")]),
                     "body": .string("About {{foreground_document}}"),
                 ])),
             ],
@@ -105,7 +94,7 @@ struct WorkflowTwoRoundTests {
         let plan = WorkflowPlan(
             outcome: .requiresBinding, nodes: [
                 WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                    "contactID": .object(["$slot": "current_contact"]),
+                    "contactID": .object(["$slot": .string("current_contact")]),
                     "body": .string("About {{foreground_document}}"),
                 ])),
             ],
@@ -126,7 +115,7 @@ struct WorkflowTwoRoundTests {
         let plan = WorkflowPlan(
             outcome: .requiresBinding, nodes: [
                 WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                    "contactID": .object(["$slot": "current_contact"]), "body": .string("hi"),
+                    "contactID": .object(["$slot": .string("current_contact")]), "body": .string("hi"),
                 ])),
             ],
             contextSlots: [WorkflowContextSlot(slotID: "current_contact", source: "current_contact")]
@@ -141,7 +130,7 @@ struct WorkflowTwoRoundTests {
         let plan = WorkflowPlan(
             outcome: .requiresBinding, nodes: [
                 WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                    "contactID": .object(["$slot": "current_contact"]),
+                    "contactID": .object(["$slot": .string("current_contact")]),
                     "body": .string("a reminder"),
                 ])),
             ],
@@ -158,12 +147,12 @@ struct WorkflowTwoRoundTests {
     @Test func resolveBindingValidatesShapeAndResolves() throws {
         let plan = WorkflowPlan(outcome: .requiresBinding, nodes: [
             WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                "contactID": .object(["$slot": "current_contact"]), "body": .string("hi"),
+                "contactID": .object(["$slot": .string("current_contact")]), "body": .string("hi"),
             ])),
         ], contextSlots: [WorkflowContextSlot(slotID: "current_contact", source: "current_contact")])
         let binding = WorkflowBinding(status: .complete, nodes: [
             WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                "contactID": .object(["$bind": "ctx_current_contact_0"]), "body": .string("hi"),
+                "contactID": .object(["$bind": .string("ctx_current_contact_0")]), "body": .string("hi"),
             ])),
         ])
         let resolved = try WorkflowTwoRoundCompiler.resolveBinding(binding, plan: plan, packet: packet())
@@ -173,13 +162,13 @@ struct WorkflowTwoRoundTests {
     @Test func resolveBindingRejectsCandidateFromWrongSlot() {
         let plan = WorkflowPlan(outcome: .requiresBinding, nodes: [
             WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                "contactID": .object(["$slot": "current_contact"]), "body": .string("hi"),
+                "contactID": .object(["$slot": .string("current_contact")]), "body": .string("hi"),
             ])),
         ], contextSlots: [WorkflowContextSlot(slotID: "current_contact", source: "current_contact")])
         // Binds the document candidate into the contact field → must be rejected.
         let binding = WorkflowBinding(status: .complete, nodes: [
             WorkflowPlanNode(id: "send", tool: "send_message", input: .object([
-                "contactID": .object(["$bind": "ctx_foreground_document_0"]), "body": .string("hi"),
+                "contactID": .object(["$bind": .string("ctx_foreground_document_0")]), "body": .string("hi"),
             ])),
         ])
         #expect(throws: WorkflowTwoRoundCompiler.CompileError.self) {
@@ -262,16 +251,16 @@ struct WorkflowTwoRoundTests {
                 input: .object(["body": .string("Line 1\nLine 2 \"quoted\"")])
             ),
         ])
-        let value = try JSONDecoder().decode(JSONValue.self, from: Data(rendered.utf8))
-        guard case .object(let object) = value,
-              case .object(let input)? = object["input"]
+        let value = try GeneratedContent(json: rendered)
+        guard case .structure(let object, _) = value.kind,
+              case .structure(let input, _)? = object["input"]?.kind
         else {
             Issue.record("rendered node must be valid JSON object")
             return
         }
-        #expect(object["id"] == .string("send"))
-        #expect(object["tool"] == .string("send_\"message"))
-        #expect(input["body"] == .string("Line 1\nLine 2 \"quoted\""))
+        #expect(object["id"]?.stringValue == "send")
+        #expect(object["tool"]?.stringValue == "send_\"message")
+        #expect(input["body"]?.stringValue == "Line 1\nLine 2 \"quoted\"")
     }
 
     // MARK: plan cache
@@ -294,7 +283,7 @@ struct WorkflowTwoRoundTests {
 
     @Test func effectiveOutcomeFromStructure() {
         let withSlot = WorkflowPlan(outcome: .selfContained, nodes: [
-            WorkflowPlanNode(id: "a", tool: "t", input: .object(["x": .object(["$slot": "s"])])),
+            WorkflowPlanNode(id: "a", tool: "t", input: .object(["x": .object(["$slot": .string("s")])])),
         ], contextSlots: [WorkflowContextSlot(slotID: "s", source: "src")])
         #expect(withSlot.effectiveOutcome == .requiresBinding)  // overrides mislabel
 

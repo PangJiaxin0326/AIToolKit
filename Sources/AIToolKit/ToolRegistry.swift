@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 /// Process-wide tool registry. Allows per-view subsetting via the tool-name
 /// set the host caller supplies (AIKitCapability's `ViewContext.toolNames`
@@ -15,30 +16,26 @@ public actor ToolRegistry {
 
     public init() {}
 
-    public func register<T: Tool>(_ tool: T) {
-        let descriptor = T.descriptor
-        let name = T.name
+    public func register<T: FoundationModels.Tool>(_ tool: T)
+    where T.Arguments: Generable, T.Output: Generable {
+        let descriptor = tool.descriptor
+        let name = tool.name
         entries[name] = Entry(descriptor: descriptor) { data, context in
-            let decoder = JSONDecoder()
-            let encoder = JSONEncoder()
-            let input: T.Input
+            _ = context
+            let arguments: T.Arguments
             do {
-                input = try decoder.decode(T.Input.self, from: data)
+                let content = try GeneratedContent(
+                    json: String(decoding: data, as: UTF8.self)
+                )
+                arguments = try T.Arguments(content)
             } catch {
                 throw ToolRegistryError.decodingFailed(
                     name: name,
                     detail: String(describing: error)
                 )
             }
-            let output = try await tool.call(input, in: context)
-            do {
-                return try encoder.encode(output)
-            } catch {
-                throw ToolRegistryError.encodingFailed(
-                    name: name,
-                    detail: String(describing: error)
-                )
-            }
+            let output = try await tool.call(arguments: arguments)
+            return Data(output.generatedContent.jsonString.utf8)
         }
     }
 
@@ -69,29 +66,28 @@ public actor ToolRegistry {
         names.compactMap { entries[$0]?.descriptor }.sorted { $0.name < $1.name }
     }
 
-    /// Dispatches a call by name; decodes input, encodes output.
+    /// Dispatches a call by name; decodes arguments and encodes output.
     public func call(
         name: String,
-        jsonInput: Data,
+        jsonArguments: Data,
         context: ToolContext
     ) async throws -> Data {
         guard let entry = entries[name] else {
             throw ToolRegistryError.notRegistered(name)
         }
-        return try await entry.call(jsonInput, context)
+        return try await entry.call(jsonArguments, context)
     }
 
     public func call(
         _ call: ToolCall,
         context: ToolContext
-    ) async throws -> JSONValue {
-        let data = try call.input.data()
+    ) async throws -> GeneratedContent {
+        let data = call.arguments.data()
         let output = try await self.call(
             name: call.name,
-            jsonInput: data,
+            jsonArguments: data,
             context: context
         )
-        return (try? JSONValue(data: output))
-            ?? .string(String(decoding: output, as: UTF8.self))
+        return try GeneratedContent(data: output)
     }
 }

@@ -1,29 +1,30 @@
 import Foundation
+import FoundationModels
 
 public actor WorkflowResultStore {
-    private var outputs: [String: JSONValue] = [:]
+    private var outputs: [String: GeneratedContent] = [:]
 
     public init() {}
 
-    public func set(_ output: JSONValue, for nodeID: String) {
+    public func set(_ output: GeneratedContent, for nodeID: String) {
         outputs[nodeID] = output
     }
 
-    public func output(for nodeID: String) -> JSONValue? {
+    public func output(for nodeID: String) -> GeneratedContent? {
         outputs[nodeID]
     }
 
-    public func snapshot() -> [String: JSONValue] {
+    public func snapshot() -> [String: GeneratedContent] {
         outputs
     }
 }
 
 public enum WorkflowOutputRedactor {
     public static func diagnosticValue(
-        _ value: JSONValue,
+        _ value: GeneratedContent,
         node: WorkflowNode,
         descriptor: ToolDescriptor?
-    ) -> JSONValue {
+    ) -> GeneratedContent {
         guard node.outputPolicy.redaction == .toolDefault else { return value }
         if descriptor?.annotations?.sensitiveOutput == ToolAnnotations.SensitiveOutput.none {
             return value
@@ -31,15 +32,17 @@ public enum WorkflowOutputRedactor {
         return redact(value)
     }
 
-    private static func redact(_ value: JSONValue) -> JSONValue {
-        switch value {
+    private static func redact(_ value: GeneratedContent) -> GeneratedContent {
+        switch value.kind {
         case .string:
             return .string("[REDACTED]")
         case .array(let values):
             return .array(values.map(redact))
-        case .object(let object):
+        case .structure(let object, _):
             return .object(object.mapValues(redact))
-        case .null, .bool, .int, .number:
+        case .null, .bool, .number:
+            return value
+        @unknown default:
             return value
         }
     }
@@ -48,14 +51,14 @@ public enum WorkflowOutputRedactor {
 public enum WorkflowFinalRenderer {
     public static func render(
         _ final: WorkflowFinal,
-        outputs: [String: JSONValue],
-        context: JSONValue = .object([:]),
-        userInput: JSONValue = .object([:])
-    ) throws -> (value: JSONValue, text: String?) {
+        outputs: [String: GeneratedContent],
+        context: GeneratedContent = .object([:]),
+        userInput: GeneratedContent = .object([:])
+    ) throws -> (value: GeneratedContent, text: String?) {
         switch final.kind {
         case .value:
             let value = try WorkflowReferenceResolver.resolve(
-                final.value ?? .null,
+                final.value ?? .nullContent,
                 outputs: outputs,
                 context: context,
                 userInput: userInput,
@@ -95,10 +98,10 @@ public enum WorkflowFinalRenderer {
 
     private static func renderTemplate(
         _ template: String,
-        bindings: [String: JSONValue],
-        outputs: [String: JSONValue],
-        context: JSONValue,
-        userInput: JSONValue
+        bindings: [String: GeneratedContent],
+        outputs: [String: GeneratedContent],
+        context: GeneratedContent,
+        userInput: GeneratedContent
     ) throws -> String {
         var resolvedBindings: [String: String] = [:]
         for (name, value) in bindings {
@@ -118,23 +121,20 @@ public enum WorkflowFinalRenderer {
         return result
     }
 
-    public static func displayString(_ value: JSONValue) -> String {
-        switch value {
+    public static func displayString(_ value: GeneratedContent) -> String {
+        switch value.kind {
         case .null:
             return "null"
         case .bool(let value):
             return value ? "true" : "false"
-        case .int(let value):
-            return String(value)
         case .number(let value):
             return String(value)
         case .string(let value):
             return value
-        case .array, .object:
-            guard let data = try? value.data(),
-                  let text = String(data: data, encoding: .utf8)
-            else { return "\(value)" }
-            return text
+        case .array, .structure:
+            return value.jsonString
+        @unknown default:
+            return value.jsonString
         }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 public enum WorkflowNodeStatus: String, Sendable, Codable, Hashable {
     case pending
@@ -56,20 +57,20 @@ public struct WorkflowTrace: Sendable, Codable, Hashable {
     }
 }
 
-public struct WorkflowResult: Sendable, Codable, Hashable {
+public struct WorkflowResult: Sendable, Equatable {
     public var workflowID: String
     public var mode: WorkflowMode
-    public var finalValue: JSONValue
+    public var finalValue: GeneratedContent
     public var finalText: String?
-    public var nodeOutputs: [String: JSONValue]
+    public var nodeOutputs: [String: GeneratedContent]
     public var trace: WorkflowTrace
 
     public init(
         workflowID: String,
         mode: WorkflowMode,
-        finalValue: JSONValue,
+        finalValue: GeneratedContent,
         finalText: String? = nil,
-        nodeOutputs: [String: JSONValue],
+        nodeOutputs: [String: GeneratedContent],
         trace: WorkflowTrace
     ) {
         self.workflowID = workflowID

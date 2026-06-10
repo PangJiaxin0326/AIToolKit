@@ -1,6 +1,7 @@
 import Foundation
+import FoundationModels
 
-public struct WorkflowValidationPolicy: Sendable, Hashable {
+public struct WorkflowValidationPolicy: Sendable {
     public var availableTools: Set<String>
     public var descriptors: [String: ToolDescriptor]
     public var maxNodes: Int
@@ -47,7 +48,7 @@ public struct WorkflowValidationPolicy: Sendable, Hashable {
     }
 }
 
-public struct ValidatedWorkflow: Sendable, Hashable {
+public struct ValidatedWorkflow: Sendable {
     public var spec: WorkflowSpec
     public var dependencies: [String: Set<String>]
     public var levels: [[WorkflowNode]]
@@ -144,15 +145,6 @@ public enum WorkflowValidator {
                     limit: min(policy.maxOutputBytesPerNode, spec.limits.maxOutputBytesPerNode)
                 )
             }
-            if !WorkflowReferenceResolver.references(in: node.input).contains(where: { $0.source == .node }),
-               let descriptor = policy.descriptors[tool] {
-                try validate(
-                    node.input,
-                    schema: descriptor.inputSchema,
-                    nodeID: node.id,
-                    label: "input"
-                )
-            }
             byID[node.id] = node
             indexByID[node.id] = index
         }
@@ -215,13 +207,9 @@ public enum WorkflowValidator {
                     reason: "node reference must name an existing node"
                 )
             }
+            try validateJSONPointerPath(reference.path, nodeID: currentNodeID)
         case .context, .userInput:
-            guard reference.path.isEmpty || reference.path.hasPrefix("/") else {
-                throw WorkflowError.invalidReference(
-                    nodeID: currentNodeID,
-                    reason: "context/user_input path must be JSON Pointer"
-                )
-            }
+            try validateJSONPointerPath(reference.path, nodeID: currentNodeID)
         case .item:
             throw WorkflowError.invalidReference(
                 nodeID: currentNodeID,
@@ -304,22 +292,6 @@ public enum WorkflowValidator {
         return levels
     }
 
-    private static func validate(
-        _ value: JSONValue,
-        schema: JSONValue,
-        nodeID: String,
-        label: String
-    ) throws {
-        do {
-            try JSONSchemaValidator.validate(value, schema: schema)
-        } catch {
-            throw WorkflowError.nodeFailed(
-                nodeID: nodeID,
-                message: "\(label) schema validation failed: \(error)"
-            )
-        }
-    }
-
     private static func validateFinalReference(
         _ reference: WorkflowReference,
         byID: [String: WorkflowNode],
@@ -355,14 +327,17 @@ public enum WorkflowValidator {
         byID: [String: WorkflowNode],
         descriptors: [String: ToolDescriptor]
     ) throws {
-        guard let tool = byID[referencedNodeID]?.tool,
-              let schema = descriptors[tool]?.outputSchema,
-              !JSONSchemaValidator.isUnknownObject(schema)
-        else { return }
-        if JSONSchemaValidator.referencePathExists(path, in: schema) == false {
+        _ = referencedNodeID
+        _ = byID
+        _ = descriptors
+        try validateJSONPointerPath(path, nodeID: currentNodeID)
+    }
+
+    private static func validateJSONPointerPath(_ path: String, nodeID: String) throws {
+        guard path.isEmpty || path.hasPrefix("/") else {
             throw WorkflowError.invalidReference(
-                nodeID: currentNodeID,
-                reason: "path \(path.isEmpty ? "/" : path) is not present in \(referencedNodeID) output schema"
+                nodeID: nodeID,
+                reason: "path must be JSON Pointer"
             )
         }
     }

@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 /// The pure, LLM-free heart of the two-round-trip compiler: validate the
 /// Round-1 plan, decide whether binding is deterministic (auto-bind), validate
@@ -101,7 +102,7 @@ public enum WorkflowTwoRoundCompiler {
         for requirement in plan.contextSlots where !referenced.contains(requirement.slotID) {
             return nil
         }
-        var value: [String: JSONValue] = [:]
+        var value: [String: GeneratedContent] = [:]
         var label: [String: String] = [:]
         for slotID in referenced {
             guard let slot = packet.slot(slotID), slot.status == .resolved else { return nil }
@@ -117,7 +118,7 @@ public enum WorkflowTwoRoundCompiler {
             label[slotID] = pick.displayLabel
         }
         return plan.nodes.map { node in
-            let withIDs = TwoRoundValue.resolveSlots(in: node.input) { value[$0] ?? .null }
+            let withIDs = TwoRoundValue.resolveSlots(in: node.input) { value[$0] ?? .nullContent }
             let withLabels = TwoRoundValue.resolveLabels(in: withIDs) { label[$0] }
             return WorkflowPlanNode(id: node.id, tool: node.tool, input: withLabels)
         }
@@ -192,8 +193,8 @@ public enum WorkflowTwoRoundCompiler {
     // MARK: Lowering to an executable WorkflowSpec
 
     /// Lowers fully-resolved plan nodes (literals + node `$ref`s only) to a
-    /// `WorkflowSpec`, pruning each node's stray input keys to its tool schema
-    /// first. Dependencies are derived from `$ref`s, so `depends_on` is empty.
+    /// `WorkflowSpec`. Dependencies are derived from `$ref`s, so `depends_on`
+    /// is empty.
     public static func buildSpec(
         from nodes: [WorkflowPlanNode],
         descriptors: [String: ToolDescriptor],
@@ -201,13 +202,7 @@ public enum WorkflowTwoRoundCompiler {
         intent: String = "two-round bound workflow"
     ) -> WorkflowSpec {
         let pruned = nodes.map { node -> WorkflowNode in
-            let input: JSONValue
-            if let tool = node.tool, let schema = descriptors[tool]?.inputSchema {
-                input = TwoRoundValue.prune(node.input, toInputSchema: schema)
-            } else {
-                input = node.input
-            }
-            return WorkflowNode(id: node.id, tool: node.tool, dependsOn: [], input: input)
+            WorkflowNode(id: node.id, tool: node.tool, dependsOn: [], input: node.input)
         }
         return WorkflowSpec(
             workflowID: workflowID, intent: intent, nodes: pruned, final: .message("Done.")

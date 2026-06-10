@@ -1,9 +1,10 @@
 import Foundation
+import FoundationModels
 
 public enum WorkflowReferenceResolver {
-    public static func references(in value: JSONValue) -> [WorkflowReference] {
-        switch value {
-        case .object(let object):
+    public static func references(in value: GeneratedContent) -> [WorkflowReference] {
+        switch value.kind {
+        case .structure(let object, _):
             if let reference = referenceObject(object) {
                 return [reference]
             }
@@ -13,20 +14,22 @@ public enum WorkflowReferenceResolver {
             return object.values.flatMap(references)
         case .array(let values):
             return values.flatMap(references)
-        case .null, .bool, .int, .number, .string:
+        case .null, .bool, .number, .string:
+            return []
+        @unknown default:
             return []
         }
     }
 
     public static func resolve(
-        _ value: JSONValue,
-        outputs: [String: JSONValue],
-        context: JSONValue = .object([:]),
-        userInput: JSONValue = .object([:]),
+        _ value: GeneratedContent,
+        outputs: [String: GeneratedContent],
+        context: GeneratedContent = .object([:]),
+        userInput: GeneratedContent = .object([:]),
         currentNodeID: String
-    ) throws -> JSONValue {
-        switch value {
-        case .object(let object):
+    ) throws -> GeneratedContent {
+        switch value.kind {
+        case .structure(let object, _):
             if let literal = object["$literal"], object.count == 1 {
                 return literal
             }
@@ -39,7 +42,7 @@ public enum WorkflowReferenceResolver {
                     currentNodeID: currentNodeID
                 )
             }
-            var resolved: [String: JSONValue] = [:]
+            var resolved: [String: GeneratedContent] = [:]
             for (key, child) in object {
                 resolved[key] = try resolve(
                     child,
@@ -60,19 +63,21 @@ public enum WorkflowReferenceResolver {
                     currentNodeID: currentNodeID
                 )
             })
-        case .null, .bool, .int, .number, .string:
+        case .null, .bool, .number, .string:
+            return value
+        @unknown default:
             return value
         }
     }
 
     public static func resolve(
         _ reference: WorkflowReference,
-        outputs: [String: JSONValue],
-        context: JSONValue = .object([:]),
-        userInput: JSONValue = .object([:]),
+        outputs: [String: GeneratedContent],
+        context: GeneratedContent = .object([:]),
+        userInput: GeneratedContent = .object([:]),
         currentNodeID: String
-    ) throws -> JSONValue {
-        let root: JSONValue?
+    ) throws -> GeneratedContent {
+        let root: GeneratedContent?
         switch reference.source {
         case .node:
             guard let node = reference.node, !node.isEmpty else {
@@ -106,10 +111,10 @@ public enum WorkflowReferenceResolver {
         )
     }
 
-    static func referenceObject(_ object: [String: JSONValue]) -> WorkflowReference? {
+    static func referenceObject(_ object: [String: GeneratedContent]) -> WorkflowReference? {
         guard object.count == 1,
-              case .object(let raw)? = object["$ref"],
-              case .string(let sourceRaw)? = raw["source"],
+              case .structure(let raw, _)? = object["$ref"]?.kind,
+              case .string(let sourceRaw)? = raw["source"]?.kind,
               let source = WorkflowReference.Source(rawValue: sourceRaw)
         else { return nil }
         let node = raw["node"]?.stringValue
@@ -132,10 +137,10 @@ public enum WorkflowReferenceResolver {
 
     public static func resolvePointer(
         _ pointer: String,
-        in value: JSONValue,
+        in value: GeneratedContent,
         currentNodeID: String,
         display: String
-    ) throws -> JSONValue {
+    ) throws -> GeneratedContent {
         // Models frequently emit "/" to mean "the root", which is technically
         // not RFC 6901 ("/" is the empty-string-keyed property of the root).
         // Treat it as an alias for "" — the alternative is a hard failure on
@@ -152,8 +157,8 @@ public enum WorkflowReferenceResolver {
             let token = raw
                 .replacingOccurrences(of: "~1", with: "/")
                 .replacingOccurrences(of: "~0", with: "~")
-            switch current {
-            case .object(let object):
+            switch current.kind {
+            case .structure(let object, _):
                 guard let next = object[String(token)] else {
                     throw WorkflowError.unresolvedReference(
                         nodeID: currentNodeID, reference: display
@@ -167,7 +172,11 @@ public enum WorkflowReferenceResolver {
                     )
                 }
                 current = values[index]
-            case .null, .bool, .int, .number, .string:
+            case .null, .bool, .number, .string:
+                throw WorkflowError.unresolvedReference(
+                    nodeID: currentNodeID, reference: display
+                )
+            @unknown default:
                 throw WorkflowError.unresolvedReference(
                     nodeID: currentNodeID, reference: display
                 )

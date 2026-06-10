@@ -1,14 +1,15 @@
 import Foundation
+import FoundationModels
 
 public struct WorkflowExecutionContext: Sendable {
     public var toolContext: ToolContext
-    public var context: JSONValue
-    public var userInput: JSONValue
+    public var context: GeneratedContent
+    public var userInput: GeneratedContent
 
     public init(
         toolContext: ToolContext = ToolContext(),
-        context: JSONValue = .object([:]),
-        userInput: JSONValue = .object([:])
+        context: GeneratedContent = .object([:]),
+        userInput: GeneratedContent = .object([:])
     ) {
         self.toolContext = toolContext
         self.context = context
@@ -19,9 +20,9 @@ public struct WorkflowExecutionContext: Sendable {
 public struct WorkflowExecutor: Sendable {
     public typealias Dispatch = @Sendable (
         _ node: WorkflowNode,
-        _ resolvedInput: JSONValue,
+        _ resolvedInput: GeneratedContent,
         _ context: WorkflowExecutionContext
-    ) async throws -> JSONValue
+    ) async throws -> GeneratedContent
 
     public var dispatch: Dispatch
 
@@ -35,7 +36,7 @@ public struct WorkflowExecutor: Sendable {
                 throw WorkflowError.missingTool(nodeID: node.id)
             }
             return try await registry.call(
-                ToolCall(id: "workflow-\(node.id)", name: tool, input: input),
+                ToolCall(id: "workflow-\(node.id)", name: tool, arguments: input),
                 context: context.toolContext
             )
         }
@@ -117,8 +118,8 @@ public struct WorkflowExecutor: Sendable {
         }
 
         let outputs = await store.snapshot()
-        let exposedOutputs: [String: JSONValue] = Dictionary(
-            uniqueKeysWithValues: outputs.compactMap { id, output -> (String, JSONValue)? in
+        let exposedOutputs: [String: GeneratedContent] = Dictionary(
+            uniqueKeysWithValues: outputs.compactMap { id, output -> (String, GeneratedContent)? in
             guard spec.nodes.first(where: { $0.id == id })?.outputPolicy.exposeToFinal == true
             else { return nil }
             return (id, output)
@@ -143,14 +144,14 @@ public struct WorkflowExecutor: Sendable {
 
     private struct NodeRunResult: Sendable {
         let node: WorkflowNode
-        let output: JSONValue
+        let output: GeneratedContent
         let trace: WorkflowNodeTrace
         let skipDependents: Bool
     }
 
     private func runChunk(
         _ nodes: [WorkflowNode],
-        snapshot: [String: JSONValue],
+        snapshot: [String: GeneratedContent],
         context: WorkflowExecutionContext,
         descriptors: [String: ToolDescriptor],
         workflowDeadline: ContinuousClock.Instant,
@@ -179,7 +180,7 @@ public struct WorkflowExecutor: Sendable {
 
     private func runNode(
         _ node: WorkflowNode,
-        snapshot: [String: JSONValue],
+        snapshot: [String: GeneratedContent],
         context: WorkflowExecutionContext,
         descriptors: [String: ToolDescriptor],
         workflowDeadline: ContinuousClock.Instant,
@@ -194,10 +195,6 @@ public struct WorkflowExecutor: Sendable {
             userInput: context.userInput,
             currentNodeID: node.id
         )
-        if let descriptor = node.tool.flatMap({ descriptors[$0] }) {
-            try validate(resolvedInput, schema: descriptor.inputSchema, nodeID: node.id, label: "input")
-        }
-
         let maxAttempts = max(1, node.policy.retry.maxAttempts)
         var attempts = 0
         var lastError: (any Error)?
@@ -213,14 +210,10 @@ public struct WorkflowExecutor: Sendable {
                 ) {
                     try await dispatch(node, resolvedInput, context)
                 }
-                if let descriptor = node.tool.flatMap({ descriptors[$0] }),
-                   let outputSchema = descriptor.outputSchema {
-                    try validate(output, schema: outputSchema, nodeID: node.id, label: "output")
-                }
                 try validateOutputSize(output, node: node)
                 return NodeRunResult(
                     node: node,
-                    output: node.outputPolicy.store ? output : .null,
+                    output: node.outputPolicy.store ? output : .nullContent,
                     trace: WorkflowNodeTrace(
                         nodeID: node.id,
                         tool: node.tool,
@@ -247,7 +240,7 @@ public struct WorkflowExecutor: Sendable {
         case .continueWithNull:
             return NodeRunResult(
                 node: node,
-                output: .null,
+                output: .nullContent,
                 trace: failedTrace(node: node, attempts: attempts, started: started, error: lastError),
                 skipDependents: false
             )
@@ -264,7 +257,7 @@ public struct WorkflowExecutor: Sendable {
         case .skipDependents:
             return NodeRunResult(
                 node: node,
-                output: .null,
+                output: .nullContent,
                 trace: failedTrace(node: node, attempts: attempts, started: started, error: lastError),
                 skipDependents: true
             )
@@ -298,29 +291,13 @@ public struct WorkflowExecutor: Sendable {
         return (error as? any ToolError)?.isRetriable == true
     }
 
-    private func validateOutputSize(_ output: JSONValue, node: WorkflowNode) throws {
-        let bytes = (try? output.data().count) ?? 0
+    private func validateOutputSize(_ output: GeneratedContent, node: WorkflowNode) throws {
+        let bytes = output.jsonString.utf8.count
         guard bytes <= node.outputPolicy.maxBytes else {
             throw WorkflowError.outputLimitExceeded(
                 nodeID: node.id,
                 bytes: bytes,
                 limit: node.outputPolicy.maxBytes
-            )
-        }
-    }
-
-    private func validate(
-        _ value: JSONValue,
-        schema: JSONValue,
-        nodeID: String,
-        label: String
-    ) throws {
-        do {
-            try JSONSchemaValidator.validate(value, schema: schema)
-        } catch {
-            throw WorkflowError.nodeFailed(
-                nodeID: nodeID,
-                message: "\(label) schema validation failed: \(error)"
             )
         }
     }

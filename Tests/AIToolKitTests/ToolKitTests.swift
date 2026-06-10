@@ -1,117 +1,102 @@
 import Foundation
+import FoundationModels
 import SwiftUI
 import Testing
 @testable import AIToolKit
 
 private struct EchoTool: Tool {
-    struct Input: Codable, Sendable { var text: String }
-    struct Output: Codable, Sendable { var echoed: String }
+    @Generable
+    struct Arguments { var text: String }
 
-    static let name = "echo"
-    static let description = "Echoes input back."
-    static let inputSchema = ToolSchema.object(
-        properties: ["text": .string(description: "anything")],
-        required: ["text"]
-    )
+    @Generable
+    struct Output { var echoed: String }
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
-        Output(echoed: "\(context.viewID):\(input.text)")
+    let name = "echo"
+    let description = "Echoes input back."
+
+    func call(arguments: Arguments) async throws -> Output {
+        Output(echoed: arguments.text)
     }
 }
 
 private struct UppercaseTool: Tool {
-    struct Input: Codable, Sendable { var text: String }
-    struct Output: Codable, Sendable { var uppercased: String }
+    @Generable
+    struct Arguments { var text: String }
 
-    static let name = "uppercase"
-    static let description = "Uppercases input text."
-    static let inputSchema = ToolSchema.object(
-        properties: ["text": .string(description: "text to uppercase")],
-        required: ["text"]
-    )
+    @Generable
+    struct Output { var uppercased: String }
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
-        Output(uppercased: input.text.uppercased() + (context.metadata["suffix"] ?? ""))
+    let name = "uppercase"
+    let description = "Uppercases input text."
+
+    func call(arguments: Arguments) async throws -> Output {
+        Output(uppercased: arguments.text.uppercased())
     }
 }
 
-private struct SeedTool: Tool {
-    struct Input: Codable, Sendable { var value: String }
-    struct Output: Codable, Sendable { var value: String }
+private struct SeedTool: Tool, ToolMetadataProviding {
+    @Generable
+    struct Arguments { var value: String }
 
-    static let name = "seed"
-    static let description = "Returns a seed value."
-    static let inputSchema = ToolSchema.object(
-        properties: ["value": .string],
-        required: ["value"]
-    )
-    static let outputSchema = ToolSchema.strictObject(
-        properties: ["value": .string],
-        required: ["value"]
-    )
-    static let annotations = ToolAnnotations(
+    @Generable
+    struct Output { var value: String }
+
+    let name = "seed"
+    let description = "Returns a seed value."
+    let annotations = ToolAnnotations(
         isReadOnly: true,
         isIdempotent: true,
         sideEffect: .none,
         sensitiveOutput: .none
     )
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
-        Output(value: input.value)
+    func call(arguments: Arguments) async throws -> Output {
+        Output(value: arguments.value)
     }
 }
 
 private struct JoinTool: Tool {
-    struct Input: Codable, Sendable { var left: String; var right: String }
-    struct Output: Codable, Sendable { var combined: String }
+    @Generable
+    struct Arguments { var left: String; var right: String }
 
-    static let name = "join"
-    static let description = "Joins two strings."
-    static let inputSchema = ToolSchema.object(
-        properties: ["left": .string, "right": .string],
-        required: ["left", "right"]
-    )
-    static let outputSchema = ToolSchema.strictObject(
-        properties: ["combined": .string],
-        required: ["combined"]
-    )
+    @Generable
+    struct Output { var combined: String }
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
-        Output(combined: "\(input.left)-\(input.right)")
+    let name = "join"
+    let description = "Joins two strings."
+
+    func call(arguments: Arguments) async throws -> Output {
+        Output(combined: "\(arguments.left)-\(arguments.right)")
     }
 }
 
-private struct BadOutputTool: Tool {
-    struct Input: Codable, Sendable {}
-    struct Output: Codable, Sendable { var value: Int }
-
-    static let name = "bad_output"
-    static let description = "Returns output that does not match its schema."
-    static let inputSchema = ToolSchema.object(properties: [:])
-    static let outputSchema = ToolSchema.object(
-        properties: ["value": .string],
-        required: ["value"]
-    )
-
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
-        Output(value: 42)
-    }
+@Generable
+private struct StringValueOutput {
+    var value: String
 }
 
 private struct LabelViewTool: ViewTool {
-    struct Input: Codable, Sendable { var title: String }
+    @Generable
+    struct Arguments { var title: String }
 
-    static let name = "label"
-    static let description = "Builds a label view."
-    static let inputSchema = ToolSchema.object(
-        properties: ["title": .string(description: "label title")],
-        required: ["title"]
-    )
+    let name = "label"
+    let description = "Builds a label view."
 
     @MainActor
-    func call(_ input: Input, in context: ToolContext) async throws -> Text {
-        Text("\(context.viewID):\(input.title)")
+    func call(arguments: Arguments, in context: ToolContext) async throws -> Text {
+        Text("\(context.viewID):\(arguments.title)")
     }
+}
+
+private func jsonData(_ value: some ConvertibleToGeneratedContent) -> Data {
+    Data(value.generatedContent.jsonString.utf8)
+}
+
+private func generatedValue<Value: ConvertibleFromGeneratedContent>(
+    _ type: Value.Type = Value.self,
+    from data: Data
+) throws -> Value {
+    try Value(GeneratedContent(json: String(decoding: data, as: UTF8.self)))
 }
 
 @Suite struct ToolKitRegistryTests {
@@ -119,12 +104,12 @@ private struct LabelViewTool: ViewTool {
         let registry = ToolRegistry()
         await registry.register(EchoTool())
         let context = ToolContext(viewID: "home")
-        let input = try JSONEncoder().encode(EchoTool.Input(text: "hi"))
+        let input = jsonData(EchoTool.Arguments(text: "hi"))
         let outData = try await registry.call(
-            name: "echo", jsonInput: input, context: context
+            name: "echo", jsonArguments: input, context: context
         )
-        let output = try JSONDecoder().decode(EchoTool.Output.self, from: outData)
-        #expect(output.echoed == "home:hi")
+        let output = try generatedValue(EchoTool.Output.self, from: outData)
+        #expect(output.echoed == "hi")
     }
 
     @Test func manifestSubsetting() async {
@@ -141,97 +126,114 @@ private struct LabelViewTool: ViewTool {
         await #expect(throws: ToolRegistryError.self) {
             try await registry.call(
                 name: "nope",
-                jsonInput: Data("{}".utf8),
+                jsonArguments: Data("{}".utf8),
                 context: ToolContext(viewID: "v")
             )
         }
     }
 
-    @Test func descriptorPreservesNameAndSchema() {
-        let descriptor = EchoTool.descriptor
-        #expect(descriptor.name == EchoTool.name)
-        #expect(descriptor.description == EchoTool.description)
-        #expect(descriptor.inputSchema == EchoTool.inputSchema.json)
-        #expect(descriptor.outputSchema == EchoTool.outputSchema.json)
+    @Test func descriptorPreservesNameAndSchema() throws {
+        let tool = EchoTool()
+        let descriptor = tool.descriptor
+        #expect(descriptor.name == tool.name)
+        #expect(descriptor.description == tool.description)
+        #expect(try descriptor.argumentsSchema.jsonString().contains("\"text\""))
+        guard let outputSchema = descriptor.outputSchema else {
+            Issue.record("descriptor must include output schema")
+            return
+        }
+        #expect(try outputSchema.jsonString().contains("\"echoed\""))
     }
 
     @Test func toolCanUseCallAsFunction() async throws {
         let output = try await EchoTool().callAsFunction(
-            EchoTool.Input(text: "hi"),
-            in: ToolContext(viewID: "home")
+            EchoTool.Arguments(text: "hi")
         )
-        #expect(output.echoed == "home:hi")
+        #expect(output.echoed == "hi")
     }
 
     @Test func toolRegistersAndUsesCallAsFunction() async throws {
         let registry = ToolRegistry()
         await registry.register(UppercaseTool())
-        let input = try JSONEncoder().encode(UppercaseTool.Input(text: "hi"))
+        let input = jsonData(UppercaseTool.Arguments(text: "hi"))
         let outData = try await registry.call(
             name: "uppercase",
-            jsonInput: input,
+            jsonArguments: input,
             context: ToolContext(metadata: ["suffix": "!"])
         )
-        let output = try JSONDecoder().decode(UppercaseTool.Output.self, from: outData)
-        #expect(output.uppercased == "HI!")
+        let output = try generatedValue(UppercaseTool.Output.self, from: outData)
+        #expect(output.uppercased == "HI")
 
         let callableOutput = try await UppercaseTool().callAsFunction(
-            UppercaseTool.Input(text: "go"),
-            in: ToolContext(metadata: ["suffix": "."])
+            UppercaseTool.Arguments(text: "go")
         )
-        #expect(callableOutput.uppercased == "GO.")
+        #expect(callableOutput.uppercased == "GO")
     }
 
-    @Test func toolSchemaObjectHasRequiredFields() {
-        let schema = ToolSchema.object(
-            properties: ["a": .string],
-            required: ["a"]
-        )
-        guard case let .object(fields) = schema.json else {
+    @Test func generationSchemaObjectHasRequiredFields() throws {
+        let schema = try GeneratedContent(json: EchoTool.Arguments.generationSchema.jsonString())
+        guard case let .structure(fields, _) = schema.kind else {
             Issue.record("schema must be an object")
             return
         }
-        #expect(fields["type"] == .string("object"))
-        #expect(fields["required"] == .array([.string("a")]))
+        #expect(fields["type"]?.stringValue == "object")
+        #expect(fields["required"]?.allStrings == ["text"])
     }
 
-    @Test func strictObjectDisallowsAdditionalProperties() {
-        let schema = ToolSchema.strictObject(
-            properties: ["a": .string],
-            required: ["a"]
-        )
-        guard case let .object(fields) = schema.json else {
+    @Test func generationSchemaDisallowsAdditionalProperties() throws {
+        let schema = try GeneratedContent(json: EchoTool.Arguments.generationSchema.jsonString())
+        guard case let .structure(fields, _) = schema.kind else {
             Issue.record("schema must be an object")
             return
         }
-        #expect(fields["additionalProperties"] == .bool(false))
+        #expect(fields["additionalProperties"]?.boolValue == false)
     }
 
-    @Test func jsonValueIntValueRejectsUnsafeNumbers() {
-        #expect(JSONValue.number(42.0).intValue == 42)
-        #expect(JSONValue.number(42.5).intValue == nil)
-        #expect(JSONValue.number(.infinity).intValue == nil)
-        #expect(JSONValue.number(.nan).intValue == nil)
-        #expect(JSONValue.number(Double.greatestFiniteMagnitude).intValue == nil)
+    @Test func generatedContentIntValueRejectsUnsafeNumbers() {
+        #expect(GeneratedContent.number(42.0).intValue == 42)
+        #expect(GeneratedContent.number(42.5).intValue == nil)
+        #expect(GeneratedContent.number(Double.greatestFiniteMagnitude).intValue == nil)
     }
 
-    @Test func schemaReferencePathRejectsNegativeArrayIndex() {
-        let item = ToolSchema.strictObject(
-            properties: ["value": .string],
-            required: ["value"]
+    @Test func referenceResolverRejectsNegativeArrayIndex() throws {
+        let output: GeneratedContent = .array([.object(["value": .string("ok")])])
+        let validInput: GeneratedContent = .object([
+            "value": .object(["$ref": .object([
+                "source": .string("node"),
+                "node": .string("source"),
+                "path": .string("/0/value"),
+            ])]),
+        ])
+        let resolved = try WorkflowReferenceResolver.resolve(
+            validInput,
+            outputs: ["source": output],
+            currentNodeID: "consumer"
         )
-        let schema = ToolSchema.array(of: item).json
-        #expect(JSONSchemaValidator.referencePathExists("/0/value", in: schema) == true)
-        #expect(JSONSchemaValidator.referencePathExists("/-1/value", in: schema) == false)
+        #expect(resolved == .object(["value": .string("ok")]))
+
+        let invalidInput: GeneratedContent = .object([
+            "value": .object(["$ref": .object([
+                "source": .string("node"),
+                "node": .string("source"),
+                "path": .string("/-1/value"),
+            ])]),
+        ])
+        #expect(throws: WorkflowError.self) {
+            _ = try WorkflowReferenceResolver.resolve(
+                invalidInput,
+                outputs: ["source": output],
+                currentNodeID: "consumer"
+            )
+        }
     }
 }
 
 @Suite struct WorkflowKitTests {
-    @Test func workflowPromptCatalogIncludesInputAndOutputSchemas() throws {
+    @Test func workflowPromptCatalogIncludesArgumentsAndOutputSchemas() throws {
         let prompt = WorkflowPromptBuilder.planningInstruction(
-            toolManifest: [SeedTool.descriptor]
+            toolManifest: [SeedTool().descriptor]
         )
-        #expect(prompt.contains("Input schema:"))
+        #expect(prompt.contains("Arguments schema:"))
         #expect(prompt.contains("\"value\""))
         #expect(prompt.contains("Output schema:"))
         #expect(prompt.contains("Side effect: none."))
@@ -245,7 +247,7 @@ private struct LabelViewTool: ViewTool {
         let data = """
         {"id":"summarize","tool":"summarizeImageBlock","input":{}}
         """.data(using: .utf8)!
-        let decoded = try JSONDecoder().decode(WorkflowNode.self, from: data)
+        let decoded = try WorkflowNode(GeneratedContent(json: String(decoding: data, as: UTF8.self)))
         #expect(decoded.policy.timeoutMS == 20_000)
     }
 
@@ -253,16 +255,16 @@ private struct LabelViewTool: ViewTool {
         let sensitive = ToolDescriptor(
             name: "sensitive",
             description: "Sensitive output.",
-            inputSchema: ToolSchema.object(properties: [:]).json,
+            argumentsSchema: GeneratedContent.generationSchema,
             annotations: ToolAnnotations(sensitiveOutput: .personal)
         )
         let publicOutput = ToolDescriptor(
             name: "public",
             description: "Public output.",
-            inputSchema: ToolSchema.object(properties: [:]).json,
+            argumentsSchema: GeneratedContent.generationSchema,
             annotations: ToolAnnotations(sensitiveOutput: .none)
         )
-        let value: JSONValue = .object(["email": .string("alex@example.com")])
+        let value: GeneratedContent = .object(["email": .string("alex@example.com")])
         let node = WorkflowNode(id: "lookup", tool: "sensitive")
         #expect(
             WorkflowOutputRedactor.diagnosticValue(
@@ -327,7 +329,7 @@ private struct LabelViewTool: ViewTool {
         let result = try await WorkflowExecutor(registry: registry)
             .execute(validated)
         #expect(result.finalText == "a-b")
-        #expect(result.finalValue == .string("a-b"))
+        #expect(result.finalValue.stringValue == "a-b")
         #expect(result.nodeOutputs.keys.sorted() == ["join_values", "left", "right"])
     }
 
@@ -365,7 +367,10 @@ private struct LabelViewTool: ViewTool {
         }
     }
 
-    @Test func rejectsInvalidLiteralInputAgainstToolSchema() throws {
+    @Test func rejectsInvalidLiteralArgumentsAtToolDispatch() async throws {
+        let registry = ToolRegistry()
+        await registry.register(SeedTool())
+        let descriptors = await registry.registeredDescriptors()
         let spec = WorkflowSpec(
             workflowID: "wf_bad_input",
             intent: "Bad literal input.",
@@ -373,20 +378,25 @@ private struct LabelViewTool: ViewTool {
                 WorkflowNode(
                     id: "left",
                     tool: "seed",
-                    input: .object(["value": .int(1)])
+                    input: .object(["value": .number(1)])
                 ),
             ],
             final: .message("not reached")
         )
-        #expect(throws: WorkflowError.self) {
-            _ = try WorkflowValidator.validate(
-                spec,
-                policy: WorkflowValidationPolicy(descriptors: [SeedTool.descriptor])
-            )
+        let validated = try WorkflowValidator.validate(
+            spec,
+            policy: WorkflowValidationPolicy(descriptors: descriptors)
+        )
+        await #expect(throws: WorkflowError.self) {
+            _ = try await WorkflowExecutor(registry: registry).execute(validated)
         }
     }
 
-    @Test func rejectsUnknownOutputSchemaPath() throws {
+    @Test func rejectsUnknownOutputPathAtExecution() async throws {
+        let registry = ToolRegistry()
+        await registry.register(SeedTool())
+        await registry.register(JoinTool())
+        let descriptors = await registry.registeredDescriptors()
         let spec = WorkflowSpec(
             workflowID: "wf_bad_path",
             intent: "Bad reference path.",
@@ -411,13 +421,12 @@ private struct LabelViewTool: ViewTool {
             ],
             final: .nodeOutput("join_values", path: "/combined")
         )
-        #expect(throws: WorkflowError.self) {
-            _ = try WorkflowValidator.validate(
-                spec,
-                policy: WorkflowValidationPolicy(
-                    descriptors: [SeedTool.descriptor, JoinTool.descriptor]
-                )
-            )
+        let validated = try WorkflowValidator.validate(
+            spec,
+            policy: WorkflowValidationPolicy(descriptors: descriptors)
+        )
+        await #expect(throws: WorkflowError.self) {
+            _ = try await WorkflowExecutor(registry: registry).execute(validated)
         }
     }
 
@@ -438,7 +447,7 @@ private struct LabelViewTool: ViewTool {
         #expect(throws: WorkflowError.self) {
             _ = try WorkflowValidator.validate(
                 spec,
-                policy: WorkflowValidationPolicy(descriptors: [SeedTool.descriptor])
+                policy: WorkflowValidationPolicy(descriptors: [SeedTool().descriptor])
             )
         }
     }
@@ -503,24 +512,28 @@ private struct LabelViewTool: ViewTool {
         }
     }
 
-    @Test func executorValidatesOutputSchema() async throws {
-        let registry = ToolRegistry()
-        await registry.register(BadOutputTool())
-        let descriptors = await registry.registeredDescriptors()
+    @Test func executorEnforcesOutputSizeFromGeneratedContentJSON() async throws {
         let spec = WorkflowSpec(
-            workflowID: "wf_bad_output",
-            intent: "Bad output.",
+            workflowID: "wf_large_output",
+            intent: "Large output.",
             nodes: [
-                WorkflowNode(id: "bad", tool: BadOutputTool.name),
+                WorkflowNode(
+                    id: "large",
+                    tool: "large",
+                    outputPolicy: WorkflowOutputPolicy(maxBytes: 8)
+                ),
             ],
             final: .message("not reached")
         )
         let validated = try WorkflowValidator.validate(
             spec,
-            policy: WorkflowValidationPolicy(descriptors: descriptors)
+            policy: WorkflowValidationPolicy(availableTools: ["large"])
         )
+        let executor = WorkflowExecutor { _, _, _ in
+            .object(["value": .string("too long")])
+        }
         await #expect(throws: WorkflowError.self) {
-            _ = try await WorkflowExecutor(registry: registry).execute(validated)
+            _ = try await executor.execute(validated)
         }
     }
 }
@@ -530,10 +543,10 @@ private struct LabelViewTool: ViewTool {
     @Test func viewToolRegistryCallsTool() async throws {
         let registry = ViewToolRegistry()
         registry.register(LabelViewTool())
-        let input = try JSONEncoder().encode(LabelViewTool.Input(title: "Hello"))
+        let input = jsonData(LabelViewTool.Arguments(title: "Hello"))
         let view = try await registry.call(
             name: "label",
-            jsonInput: input,
+            jsonArguments: input,
             context: ToolContext(viewID: "view")
         )
         _ = view
@@ -542,7 +555,7 @@ private struct LabelViewTool: ViewTool {
     @Test func viewToolCanUseCallAsFunction() async throws {
         let tool = LabelViewTool()
         let callableView = try await tool.callAsFunction(
-            LabelViewTool.Input(title: "World"),
+            LabelViewTool.Arguments(title: "World"),
             in: ToolContext(viewID: "view")
         )
         _ = callableView

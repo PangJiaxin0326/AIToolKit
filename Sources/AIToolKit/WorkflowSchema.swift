@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 
 public enum WorkflowSchema {
     public static func descriptor(
@@ -13,10 +14,10 @@ public enum WorkflowSchema {
             inputs that depend on earlier tool outputs. The app executes the \
             workflow DAG locally and does not call the model again.
             """,
-            inputSchema: (minimal
+            argumentsSchema: minimal
                 ? minimalSpecSchema(availableTools: availableTools)
-                : specSchema(availableTools: availableTools)).json,
-            outputSchema: ToolSchema.unknownObject.json,
+                : specSchema(availableTools: availableTools),
+            outputSchema: GeneratedContent.generationSchema,
             annotations: ToolAnnotations(
                 isReadOnly: false,
                 isIdempotent: false,
@@ -28,80 +29,81 @@ public enum WorkflowSchema {
         )
     }
 
-    public static func specSchema(availableTools: [ToolDescriptor]) -> ToolSchema {
+    public static func specSchema(availableTools: [ToolDescriptor]) -> GenerationSchema {
         let toolNames = availableTools.map(\.name).sorted()
-        let retry = ToolSchema.strictObject(
+        let retry = DynamicGenerationSchema(
+            name: "WorkflowRetryPolicy",
             properties: [
-                "max_attempts": .integer,
-                "backoff_ms": .integer,
-                "retry_only_if_tool_error_is_retriable": .boolean,
-            ],
-            required: ["max_attempts", "backoff_ms", "retry_only_if_tool_error_is_retriable"]
+                property("max_attempts", integer),
+                property("backoff_ms", integer),
+                property("retry_only_if_tool_error_is_retriable", boolean),
+            ]
         )
-        let policy = ToolSchema.strictObject(
+        let policy = DynamicGenerationSchema(
+            name: "WorkflowNodePolicy",
             properties: [
-                "timeout_ms": .integer,
-                "retry": retry,
-                "on_error": .stringEnum(["abort", "continue_with_null", "continue_with_default", "skip_dependents"]),
-                "default_output": .nullable(.unknownObject),
-            ],
-            required: ["timeout_ms", "retry", "on_error", "default_output"]
+                property("timeout_ms", integer),
+                property("retry", retry),
+                property("on_error", stringEnum(["abort", "continue_with_null", "continue_with_default", "skip_dependents"])),
+                property("default_output", nullable("NullableDefaultOutput", jsonContent)),
+            ]
         )
-        let outputPolicy = ToolSchema.strictObject(
+        let outputPolicy = DynamicGenerationSchema(
+            name: "WorkflowOutputPolicy",
             properties: [
-                "store": .boolean,
-                "expose_to_final": .boolean,
-                "max_bytes": .integer,
-                "redaction": .stringEnum(["none", "tool_default"]),
-            ],
-            required: ["store", "expose_to_final", "max_bytes", "redaction"]
+                property("store", boolean),
+                property("expose_to_final", boolean),
+                property("max_bytes", integer),
+                property("redaction", stringEnum(["none", "tool_default"])),
+            ]
         )
-        let node = ToolSchema.strictObject(
+        let node = DynamicGenerationSchema(
+            name: "WorkflowNode",
             properties: [
-                "id": .string(description: "Unique snake_case node id."),
-                "kind": .stringEnum(["tool"]),
-                "tool": .stringEnum(toolNames),
-                "depends_on": .array(of: .string, maxItems: 12),
-                "input": .unknownObject,
-                "policy": policy,
-                "output_policy": outputPolicy,
-            ],
-            required: ["id", "kind", "tool", "depends_on", "input", "policy", "output_policy"]
+                property("id", string, description: "Unique snake_case node id."),
+                property("kind", stringEnum(["tool"])),
+                property("tool", stringEnum(toolNames)),
+                property("depends_on", array(of: string, maximumElements: 12)),
+                property("input", jsonContent),
+                property("policy", policy),
+                property("output_policy", outputPolicy),
+            ]
         )
-        let final = ToolSchema.strictObject(
+        let final = DynamicGenerationSchema(
+            name: "WorkflowFinal",
             properties: [
-                "kind": .stringEnum(["value", "template", "node_output", "message"]),
-                "value": .nullable(.any),
-                "template": .nullable(.string(description: "Template with {{binding}} placeholders.")),
-                "bindings": .unknownObject,
-                "node": .nullable(.string(description: "Node id for node_output final.")),
-                "path": .nullable(.string(description: "JSON Pointer path for node_output final.")),
-                "message": .nullable(.string(description: "Message for clarification/unsupported mode.")),
-            ],
-            required: ["kind", "value", "template", "bindings", "node", "path", "message"]
+                property("kind", stringEnum(["value", "template", "node_output", "message"])),
+                property("value", nullable("NullableFinalValue", jsonContent)),
+                property("template", nullable("NullableFinalTemplate", string), description: "Template with {{binding}} placeholders."),
+                property("bindings", jsonContent),
+                property("node", nullable("NullableFinalNode", string), description: "Node id for node_output final."),
+                property("path", nullable("NullableFinalPath", string), description: "JSON Pointer path for node_output final."),
+                property("message", nullable("NullableFinalMessage", string), description: "Message for clarification/unsupported mode."),
+            ]
         )
-        let limits = ToolSchema.strictObject(
+        let limits = DynamicGenerationSchema(
+            name: "WorkflowLimits",
             properties: [
-                "max_nodes": .integer,
-                "max_parallelism": .integer,
-                "deadline_ms": .integer,
-                "max_output_bytes_per_node": .integer,
-            ],
-            required: ["max_nodes", "max_parallelism", "deadline_ms", "max_output_bytes_per_node"]
+                property("max_nodes", integer),
+                property("max_parallelism", integer),
+                property("deadline_ms", integer),
+                property("max_output_bytes_per_node", integer),
+            ]
         )
-        return .strictObject(
+        let root = DynamicGenerationSchema(
+            name: "WorkflowSpec",
             properties: [
-                "schema_version": .constant(.string(WorkflowSpec.schemaVersion)),
-                "workflow_id": .string(description: "Stable workflow id for tracing."),
-                "intent": .string(description: "Human-readable workflow summary."),
-                "mode": .stringEnum(["execute", "dry_run", "needs_clarification", "unsupported"]),
-                "nodes": .array(of: node, minItems: 1, maxItems: 24),
-                "final": final,
-                "limits": limits,
-                "metadata": .unknownObject,
-            ],
-            required: ["schema_version", "workflow_id", "intent", "mode", "nodes", "final", "limits", "metadata"]
+                property("schema_version", stringEnum([WorkflowSpec.schemaVersion])),
+                property("workflow_id", string, description: "Stable workflow id for tracing."),
+                property("intent", string, description: "Human-readable workflow summary."),
+                property("mode", stringEnum(["execute", "dry_run", "needs_clarification", "unsupported"])),
+                property("nodes", array(of: node, minimumElements: 1, maximumElements: 24)),
+                property("final", final),
+                property("limits", limits),
+                property("metadata", jsonContent),
+            ]
         )
+        return generationSchema(root)
     }
 
     /// Minimal output-token schema for `response_format`. Constrains the model
@@ -111,23 +113,24 @@ public enum WorkflowSchema {
     /// (see `WorkflowSpec.init(from:)`), and node dependencies are derived
     /// from `$ref`s in `input` (see `WorkflowValidator`). Pairs with a minimal
     /// worked example so the generated DAG is as compact as the task allows.
-    public static func minimalSpecSchema(availableTools: [ToolDescriptor]) -> ToolSchema {
+    public static func minimalSpecSchema(availableTools: [ToolDescriptor]) -> GenerationSchema {
         let toolNames = availableTools.map(\.name).sorted()
-        let node = ToolSchema.strictObject(
+        let node = DynamicGenerationSchema(
+            name: "MinimalWorkflowNode",
             properties: [
-                "id": .string(description: "Unique snake_case node id."),
-                "tool": .stringEnum(toolNames),
-                "input": .unknownObject,
-            ],
-            required: ["id", "tool", "input"]
+                property("id", string, description: "Unique snake_case node id."),
+                property("tool", stringEnum(toolNames)),
+                property("input", jsonContent),
+            ]
         )
-        return .strictObject(
+        let root = DynamicGenerationSchema(
+            name: "MinimalWorkflowSpec",
             properties: [
-                "schema_version": .constant(.string(WorkflowSpec.schemaVersion)),
-                "nodes": .array(of: node, minItems: 1, maxItems: 24),
-            ],
-            required: ["schema_version", "nodes"]
+                property("schema_version", stringEnum([WorkflowSpec.schemaVersion])),
+                property("nodes", array(of: node, minimumElements: 1, maximumElements: 24)),
+            ]
         )
+        return generationSchema(root)
     }
 }
 
@@ -160,17 +163,17 @@ public enum WorkflowPromptBuilder {
         let tools = toolManifest
             .map { descriptor in
                 var line = "- \(descriptor.name): \(descriptor.description)"
-                if let text = jsonString(descriptor.inputSchema) {
-                    line += " Input schema: \(text)"
+                if let text = try? descriptor.argumentsSchema.jsonString() {
+                    line += " Arguments schema: \(text)"
                 }
                 if let output = descriptor.outputSchema,
-                   let text = jsonString(output) {
+                   let text = try? output.jsonString() {
                     line += " Output schema: \(text)"
                 }
-                if let examples = descriptor.inputExamples,
+                if let examples = descriptor.argumentExamples,
                    !examples.isEmpty,
                    let text = jsonString(.array(examples)) {
-                    line += " Input examples: \(text)"
+                    line += " Argument examples: \(text)"
                 }
                 if let annotations = descriptor.annotations {
                     line += " Side effect: \(annotations.sideEffect.rawValue)."
@@ -221,8 +224,55 @@ public enum WorkflowPromptBuilder {
         """
     }
 
-    private static func jsonString(_ value: JSONValue) -> String? {
-        guard let data = try? value.data() else { return nil }
-        return String(data: data, encoding: .utf8)
+    private static func jsonString(_ value: GeneratedContent) -> String? {
+        value.jsonString
+    }
+}
+
+private let string = DynamicGenerationSchema(type: String.self)
+private let integer = DynamicGenerationSchema(type: Int.self)
+private let boolean = DynamicGenerationSchema(type: Bool.self)
+private let jsonContent = DynamicGenerationSchema(type: GeneratedContent.self)
+
+private func property(
+    _ name: String,
+    _ schema: DynamicGenerationSchema,
+    description: String? = nil
+) -> DynamicGenerationSchema.Property {
+    DynamicGenerationSchema.Property(
+        name: name,
+        description: description,
+        schema: schema
+    )
+}
+
+private func stringEnum(_ values: [String]) -> DynamicGenerationSchema {
+    DynamicGenerationSchema(name: "StringEnum", anyOf: values)
+}
+
+private func nullable(
+    _ name: String,
+    _ schema: DynamicGenerationSchema
+) -> DynamicGenerationSchema {
+    DynamicGenerationSchema(name: name, anyOf: [schema, .null])
+}
+
+private func array(
+    of itemSchema: DynamicGenerationSchema,
+    minimumElements: Int? = nil,
+    maximumElements: Int? = nil
+) -> DynamicGenerationSchema {
+    DynamicGenerationSchema(
+        arrayOf: itemSchema,
+        minimumElements: minimumElements,
+        maximumElements: maximumElements
+    )
+}
+
+private func generationSchema(_ root: DynamicGenerationSchema) -> GenerationSchema {
+    do {
+        return try GenerationSchema(root: root, dependencies: [])
+    } catch {
+        preconditionFailure("Invalid built-in workflow GenerationSchema: \(error)")
     }
 }
