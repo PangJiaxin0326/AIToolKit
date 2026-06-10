@@ -34,7 +34,7 @@ private struct UppercaseTool: Tool {
     }
 }
 
-private struct SeedTool: Tool, ToolMetadataProviding {
+private struct SeedTool: Tool {
     @Generable
     struct Arguments { var value: String }
 
@@ -43,12 +43,6 @@ private struct SeedTool: Tool, ToolMetadataProviding {
 
     let name = "seed"
     let description = "Returns a seed value."
-    let annotations = ToolAnnotations(
-        isReadOnly: true,
-        isIdempotent: true,
-        sideEffect: .none,
-        sensitiveOutput: .none
-    )
 
     func call(arguments: Arguments) async throws -> Output {
         Output(value: arguments.value)
@@ -83,8 +77,8 @@ private struct LabelViewTool: ViewTool {
     let description = "Builds a label view."
 
     @MainActor
-    func call(arguments: Arguments, in context: ToolContext) async throws -> Text {
-        Text("\(context.viewID):\(arguments.title)")
+    func call(arguments: Arguments) async throws -> Text {
+        Text(arguments.title)
     }
 }
 
@@ -103,11 +97,8 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     @Test func registerAndCall() async throws {
         let registry = ToolRegistry()
         await registry.register(EchoTool())
-        let context = ToolContext(viewID: "home")
         let input = jsonData(EchoTool.Arguments(text: "hi"))
-        let outData = try await registry.call(
-            name: "echo", jsonArguments: input, context: context
-        )
+        let outData = try await registry.call(name: "echo", jsonArguments: input)
         let output = try generatedValue(EchoTool.Output.self, from: outData)
         #expect(output.echoed == "hi")
     }
@@ -124,11 +115,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     @Test func unknownToolThrows() async {
         let registry = ToolRegistry()
         await #expect(throws: ToolRegistryError.self) {
-            try await registry.call(
-                name: "nope",
-                jsonArguments: Data("{}".utf8),
-                context: ToolContext(viewID: "v")
-            )
+            try await registry.call(name: "nope", jsonArguments: Data("{}".utf8))
         }
     }
 
@@ -156,11 +143,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         let registry = ToolRegistry()
         await registry.register(UppercaseTool())
         let input = jsonData(UppercaseTool.Arguments(text: "hi"))
-        let outData = try await registry.call(
-            name: "uppercase",
-            jsonArguments: input,
-            context: ToolContext(metadata: ["suffix": "!"])
-        )
+        let outData = try await registry.call(name: "uppercase", jsonArguments: input)
         let output = try generatedValue(UppercaseTool.Output.self, from: outData)
         #expect(output.uppercased == "HI")
 
@@ -236,46 +219,28 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         #expect(prompt.contains("Arguments schema:"))
         #expect(prompt.contains("\"value\""))
         #expect(prompt.contains("Output schema:"))
-        #expect(prompt.contains("Side effect: none."))
     }
 
-    @Test func workflowNodesDefaultToTwentySecondTimeout() throws {
-        #expect(WorkflowNodePolicy.defaultTimeoutMS == 20_000)
-        #expect(WorkflowNodePolicy().timeoutMS == 20_000)
-        #expect(WorkflowNode(id: "summarize", tool: "summarizeImageBlock").policy.timeoutMS == 20_000)
+    @Test func workflowPromptIncludesOneGenericWorkedExample() throws {
+        let prompt = WorkflowPromptBuilder.planningInstruction(
+            toolManifest: [SeedTool().descriptor],
+            minimal: true,
+            includeExample: true
+        )
+        #expect(prompt.components(separatedBy: "Example WorkflowSpec").count == 2)
+        #expect(prompt.contains("\"$ref\""))
+    }
+
+    @Test func workflowNodesDefaultToWorkflowDeadlineGovernedTimeout() throws {
+        #expect(WorkflowNodePolicy.defaultTimeoutMS == 0)
+        #expect(WorkflowNodePolicy().timeoutMS == 0)
+        #expect(WorkflowNode(id: "summarize", tool: "summarizeImageBlock").policy.timeoutMS == 0)
 
         let data = """
         {"id":"summarize","tool":"summarizeImageBlock","input":{}}
         """.data(using: .utf8)!
         let decoded = try WorkflowNode(GeneratedContent(json: String(decoding: data, as: UTF8.self)))
-        #expect(decoded.policy.timeoutMS == 20_000)
-    }
-
-    @Test func workflowOutputRedactorUsesToolSensitivity() {
-        let sensitive = ToolDescriptor(
-            name: "sensitive",
-            description: "Sensitive output.",
-            argumentsSchema: GeneratedContent.generationSchema,
-            annotations: ToolAnnotations(sensitiveOutput: .personal)
-        )
-        let publicOutput = ToolDescriptor(
-            name: "public",
-            description: "Public output.",
-            argumentsSchema: GeneratedContent.generationSchema,
-            annotations: ToolAnnotations(sensitiveOutput: .none)
-        )
-        let value: GeneratedContent = .object(["email": .string("alex@example.com")])
-        let node = WorkflowNode(id: "lookup", tool: "sensitive")
-        #expect(
-            WorkflowOutputRedactor.diagnosticValue(
-                value, node: node, descriptor: sensitive
-            ) == .object(["email": .string("[REDACTED]")])
-        )
-        #expect(
-            WorkflowOutputRedactor.diagnosticValue(
-                value, node: node, descriptor: publicOutput
-            ) == value
-        )
+        #expect(decoded.policy.timeoutMS == 0)
     }
 
     @Test func validatesAndExecutesWorkflowDAG() async throws {
@@ -544,33 +509,15 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         let registry = ViewToolRegistry()
         registry.register(LabelViewTool())
         let input = jsonData(LabelViewTool.Arguments(title: "Hello"))
-        let view = try await registry.call(
-            name: "label",
-            jsonArguments: input,
-            context: ToolContext(viewID: "view")
-        )
+        let view = try await registry.call(name: "label", jsonArguments: input)
         _ = view
     }
 
     @Test func viewToolCanUseCallAsFunction() async throws {
         let tool = LabelViewTool()
         let callableView = try await tool.callAsFunction(
-            LabelViewTool.Arguments(title: "World"),
-            in: ToolContext(viewID: "view")
+            LabelViewTool.Arguments(title: "World")
         )
         _ = callableView
-    }
-}
-
-@Suite struct ToolContextTests {
-    @Test func defaultsAreEmpty() {
-        let context = ToolContext()
-        #expect(context.viewID == "")
-        #expect(context.metadata.isEmpty)
-    }
-
-    @Test func metadataRoundTrips() {
-        let context = ToolContext(viewID: "x", metadata: ["entryID": "1"])
-        #expect(context.metadata["entryID"] == "1")
     }
 }

@@ -15,7 +15,7 @@ public final class ViewToolRegistry {
 
     private struct Entry {
         let descriptor: ToolDescriptor
-        let call: (Data, ToolContext) async throws -> AnyView
+        let call: (Data) async throws -> AnyView
     }
 
     private var entries: [String: Entry] = [:]
@@ -25,7 +25,7 @@ public final class ViewToolRegistry {
     public func register<T: ViewTool>(_ tool: T) where T.Arguments: Generable {
         let descriptor = tool.descriptor
         let name = tool.name
-        entries[name] = Entry(descriptor: descriptor) { data, context in
+        entries[name] = Entry(descriptor: descriptor) { data in
             let arguments: T.Arguments
             do {
                 let content = try GeneratedContent(
@@ -38,7 +38,7 @@ public final class ViewToolRegistry {
                     detail: String(describing: error)
                 )
             }
-            let view = try await tool.call(arguments: arguments, in: context)
+            let view = try await tool.call(arguments: arguments)
             return AnyView(view)
         }
     }
@@ -65,12 +65,11 @@ public final class ViewToolRegistry {
     /// erase the resulting view to `AnyView`.
     public func call(
         name: String,
-        jsonArguments: Data,
-        context: ToolContext
+        jsonArguments: Data
     ) async throws -> AnyView {
         guard let entry = entries[name] else {
             throw ToolRegistryError.notRegistered(name)
         }
-        return try await entry.call(jsonArguments, context)
+        return try await entry.call(jsonArguments)
     }
 }

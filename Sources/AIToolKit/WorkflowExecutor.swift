@@ -2,16 +2,13 @@ import Foundation
 import FoundationModels
 
 public struct WorkflowExecutionContext: Sendable {
-    public var toolContext: ToolContext
     public var context: GeneratedContent
     public var userInput: GeneratedContent
 
     public init(
-        toolContext: ToolContext = ToolContext(),
         context: GeneratedContent = .object([:]),
         userInput: GeneratedContent = .object([:])
     ) {
-        self.toolContext = toolContext
         self.context = context
         self.userInput = userInput
     }
@@ -31,13 +28,12 @@ public struct WorkflowExecutor: Sendable {
     }
 
     public init(registry: ToolRegistry) {
-        self.dispatch = { node, input, context in
+        self.dispatch = { node, input, _ in
             guard let tool = node.tool else {
                 throw WorkflowError.missingTool(nodeID: node.id)
             }
             return try await registry.call(
-                ToolCall(id: "workflow-\(node.id)", name: tool, arguments: input),
-                context: context.toolContext
+                ToolCall(id: "workflow-\(node.id)", name: tool, arguments: input)
             )
         }
     }

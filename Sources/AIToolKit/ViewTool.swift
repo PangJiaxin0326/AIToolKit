@@ -18,7 +18,7 @@ import SwiftUI
 /// `View` is neither, and is meaningless to round-trip — the host renders it.
 ///
 /// The interface follows FoundationModels naming: tools expose `parameters`
-/// and are executed with `call(arguments:in:)`.
+/// and are executed with `call(arguments:)`.
 public protocol ViewTool: Sendable {
     associatedtype Arguments: ConvertibleFromGeneratedContent
     associatedtype Body: View
@@ -30,17 +30,14 @@ public protocol ViewTool: Sendable {
     /// Produce the view for the given arguments. Runs on the main actor because
     /// SwiftUI view construction is main-isolated.
     @MainActor
-    func call(arguments: Arguments, in context: ToolContext) async throws -> Body
+    func call(arguments: Arguments) async throws -> Body
 }
 
 extension ViewTool {
     /// Callable shorthand for direct use outside a registry.
     @MainActor
-    public func callAsFunction(
-        _ arguments: Arguments,
-        in context: ToolContext = ToolContext()
-    ) async throws -> Body {
-        try await call(arguments: arguments, in: context)
+    public func callAsFunction(_ arguments: Arguments) async throws -> Body {
+        try await call(arguments: arguments)
     }
 }
 

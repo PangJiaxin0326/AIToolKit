@@ -19,35 +19,6 @@ public actor WorkflowResultStore {
     }
 }
 
-public enum WorkflowOutputRedactor {
-    public static func diagnosticValue(
-        _ value: GeneratedContent,
-        node: WorkflowNode,
-        descriptor: ToolDescriptor?
-    ) -> GeneratedContent {
-        guard node.outputPolicy.redaction == .toolDefault else { return value }
-        if descriptor?.annotations?.sensitiveOutput == ToolAnnotations.SensitiveOutput.none {
-            return value
-        }
-        return redact(value)
-    }
-
-    private static func redact(_ value: GeneratedContent) -> GeneratedContent {
-        switch value.kind {
-        case .string:
-            return .string("[REDACTED]")
-        case .array(let values):
-            return .array(values.map(redact))
-        case .structure(let object, _):
-            return .object(object.mapValues(redact))
-        case .null, .bool, .number:
-            return value
-        @unknown default:
-            return value
-        }
-    }
-}
-
 public enum WorkflowFinalRenderer {
     public static func render(
         _ final: WorkflowFinal,

@@ -17,15 +17,7 @@ public enum WorkflowSchema {
             argumentsSchema: minimal
                 ? minimalSpecSchema(availableTools: availableTools)
                 : specSchema(availableTools: availableTools),
-            outputSchema: GeneratedContent.generationSchema,
-            annotations: ToolAnnotations(
-                isReadOnly: false,
-                isIdempotent: false,
-                sideEffect: .unknown,
-                requiresUserApproval: false,
-                allowedWithoutNetwork: true,
-                resultSummaryHint: "Workflow execution result."
-            )
+            outputSchema: GeneratedContent.generationSchema
         )
     }
 
@@ -54,7 +46,6 @@ public enum WorkflowSchema {
                 property("store", boolean),
                 property("expose_to_final", boolean),
                 property("max_bytes", integer),
-                property("redaction", stringEnum(["none", "tool_default"])),
             ]
         )
         let node = DynamicGenerationSchema(
@@ -170,14 +161,6 @@ public enum WorkflowPromptBuilder {
                    let text = try? output.jsonString() {
                     line += " Output schema: \(text)"
                 }
-                if let examples = descriptor.argumentExamples,
-                   !examples.isEmpty,
-                   let text = jsonString(.array(examples)) {
-                    line += " Argument examples: \(text)"
-                }
-                if let annotations = descriptor.annotations {
-                    line += " Side effect: \(annotations.sideEffect.rawValue)."
-                }
                 return line
             }
             .joined(separator: "\n")
@@ -222,10 +205,6 @@ public enum WorkflowPromptBuilder {
         Available workflow node tools:
         \(tools)
         """
-    }
-
-    private static func jsonString(_ value: GeneratedContent) -> String? {
-        value.jsonString
     }
 }
 

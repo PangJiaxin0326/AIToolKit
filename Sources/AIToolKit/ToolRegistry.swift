@@ -9,7 +9,7 @@ public actor ToolRegistry {
 
     private struct Entry {
         let descriptor: ToolDescriptor
-        let call: @Sendable (Data, ToolContext) async throws -> Data
+        let call: @Sendable (Data) async throws -> Data
     }
 
     private var entries: [String: Entry] = [:]
@@ -20,8 +20,7 @@ public actor ToolRegistry {
     where T.Arguments: Generable, T.Output: Generable {
         let descriptor = tool.descriptor
         let name = tool.name
-        entries[name] = Entry(descriptor: descriptor) { data, context in
-            _ = context
+        entries[name] = Entry(descriptor: descriptor) { data in
             let arguments: T.Arguments
             do {
                 let content = try GeneratedContent(
@@ -69,25 +68,17 @@ public actor ToolRegistry {
     /// Dispatches a call by name; decodes arguments and encodes output.
     public func call(
         name: String,
-        jsonArguments: Data,
-        context: ToolContext
+        jsonArguments: Data
     ) async throws -> Data {
         guard let entry = entries[name] else {
             throw ToolRegistryError.notRegistered(name)
         }
-        return try await entry.call(jsonArguments, context)
+        return try await entry.call(jsonArguments)
     }
 
-    public func call(
-        _ call: ToolCall,
-        context: ToolContext
-    ) async throws -> GeneratedContent {
+    public func call(_ call: ToolCall) async throws -> GeneratedContent {
         let data = call.arguments.data()
-        let output = try await self.call(
-            name: call.name,
-            jsonArguments: data,
-            context: context
-        )
+        let output = try await self.call(name: call.name, jsonArguments: data)
         return try GeneratedContent(data: output)
     }
 }

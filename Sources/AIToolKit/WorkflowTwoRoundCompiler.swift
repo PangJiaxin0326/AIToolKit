@@ -204,8 +204,15 @@ public enum WorkflowTwoRoundCompiler {
         let pruned = nodes.map { node -> WorkflowNode in
             WorkflowNode(id: node.id, tool: node.tool, dependsOn: [], input: node.input)
         }
+        // This spec is host-built (the planner emits only {id, tool, input}
+        // nodes), so give it the full validator-allowed deadline: nodes carry
+        // no individual timeout, and a slow-but-legitimate node (e.g. a
+        // model-backed tool) must not be killed by the lean model-facing
+        // default.
         return WorkflowSpec(
-            workflowID: workflowID, intent: intent, nodes: pruned, final: .message("Done.")
+            workflowID: workflowID, intent: intent, nodes: pruned,
+            final: .message("Done."),
+            limits: WorkflowLimits(deadlineMS: 60_000)
         )
     }
 }

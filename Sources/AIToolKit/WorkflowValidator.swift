@@ -8,7 +8,6 @@ public struct WorkflowValidationPolicy: Sendable {
     public var maxParallelism: Int
     public var maxDeadlineMS: Int
     public var maxOutputBytesPerNode: Int
-    public var allowApprovalRequiredTools: Bool
 
     public init(
         availableTools: Set<String>,
@@ -16,8 +15,7 @@ public struct WorkflowValidationPolicy: Sendable {
         maxNodes: Int = 24,
         maxParallelism: Int = 8,
         maxDeadlineMS: Int = 60_000,
-        maxOutputBytesPerNode: Int = 262_144,
-        allowApprovalRequiredTools: Bool = false
+        maxOutputBytesPerNode: Int = 262_144
     ) {
         self.availableTools = availableTools
         self.descriptors = descriptors
@@ -25,7 +23,6 @@ public struct WorkflowValidationPolicy: Sendable {
         self.maxParallelism = maxParallelism
         self.maxDeadlineMS = maxDeadlineMS
         self.maxOutputBytesPerNode = maxOutputBytesPerNode
-        self.allowApprovalRequiredTools = allowApprovalRequiredTools
     }
 
     public init(
@@ -33,8 +30,7 @@ public struct WorkflowValidationPolicy: Sendable {
         maxNodes: Int = 24,
         maxParallelism: Int = 8,
         maxDeadlineMS: Int = 60_000,
-        maxOutputBytesPerNode: Int = 262_144,
-        allowApprovalRequiredTools: Bool = false
+        maxOutputBytesPerNode: Int = 262_144
     ) {
         self.init(
             availableTools: Set(descriptors.map(\.name)),
@@ -42,8 +38,7 @@ public struct WorkflowValidationPolicy: Sendable {
             maxNodes: maxNodes,
             maxParallelism: maxParallelism,
             maxDeadlineMS: maxDeadlineMS,
-            maxOutputBytesPerNode: maxOutputBytesPerNode,
-            allowApprovalRequiredTools: allowApprovalRequiredTools
+            maxOutputBytesPerNode: maxOutputBytesPerNode
         )
     }
 }
@@ -120,11 +115,6 @@ public enum WorkflowValidator {
             guard policy.availableTools.contains(tool) else {
                 throw WorkflowError.unavailableTool(nodeID: node.id, tool: tool)
             }
-            if let descriptor = policy.descriptors[tool],
-               descriptor.annotations?.requiresUserApproval == true,
-               !policy.allowApprovalRequiredTools {
-                throw WorkflowError.unavailableTool(nodeID: node.id, tool: tool)
-            }
             guard node.policy.timeoutMS >= 0,
                   node.policy.timeoutMS <= policy.maxDeadlineMS else {
                 throw WorkflowError.deadlineExceededLimit(node.policy.timeoutMS)
@@ -156,13 +146,7 @@ public enum WorkflowValidator {
                 try validate(reference: reference, currentNodeID: node.id, byID: byID)
                 if reference.source == .node, let referencedNode = reference.node {
                     nodeDependencies.insert(referencedNode)
-                    try validateOutputPath(
-                        reference.path,
-                        referencedNodeID: referencedNode,
-                        currentNodeID: node.id,
-                        byID: byID,
-                        descriptors: policy.descriptors
-                    )
+                    try validateJSONPointerPath(reference.path, nodeID: node.id)
                 }
             }
             for dependency in nodeDependencies {
@@ -184,7 +168,7 @@ public enum WorkflowValidator {
             dependencies[node.id] = nodeDependencies
         }
 
-        try validateFinal(spec.final, byID: byID, descriptors: policy.descriptors)
+        try validateFinal(spec.final, byID: byID)
         let levels = try topologicalLevels(nodes: spec.nodes, dependencies: dependencies)
         return ValidatedWorkflow(
             spec: spec,
@@ -220,8 +204,7 @@ public enum WorkflowValidator {
 
     private static func validateFinal(
         _ final: WorkflowFinal,
-        byID: [String: WorkflowNode],
-        descriptors: [String: ToolDescriptor]
+        byID: [String: WorkflowNode]
     ) throws {
         switch final.kind {
         case .value:
@@ -230,7 +213,7 @@ public enum WorkflowValidator {
             }
             for reference in WorkflowReferenceResolver.references(in: value) {
                 try validate(reference: reference, currentNodeID: "final", byID: byID)
-                try validateFinalReference(reference, byID: byID, descriptors: descriptors)
+                try validateFinalReference(reference, byID: byID)
             }
         case .template:
             guard final.template != nil else {
@@ -239,7 +222,7 @@ public enum WorkflowValidator {
             for binding in final.bindings.values {
                 for reference in WorkflowReferenceResolver.references(in: binding) {
                     try validate(reference: reference, currentNodeID: "final", byID: byID)
-                    try validateFinalReference(reference, byID: byID, descriptors: descriptors)
+                    try validateFinalReference(reference, byID: byID)
                 }
             }
         case .nodeOutput:
@@ -247,19 +230,7 @@ public enum WorkflowValidator {
                 throw WorkflowError.unsupportedFinal(final.kind)
             }
             try validateNodeExposedToFinal(node, byID: byID)
-            try validateOutputPath(
-                final.path ?? "",
-                referencedNodeID: node,
-                currentNodeID: "final",
-                byID: byID,
-                descriptors: descriptors
-            )
-            if let path = final.path, !path.isEmpty, !path.hasPrefix("/") {
-                throw WorkflowError.invalidReference(
-                    nodeID: "final",
-                    reason: "node_output path must be JSON Pointer"
-                )
-            }
+            try validateJSONPointerPath(final.path ?? "", nodeID: "final")
         case .message:
             guard final.message != nil else {
                 throw WorkflowError.unsupportedFinal(final.kind)
@@ -294,18 +265,11 @@ public enum WorkflowValidator {
 
     private static func validateFinalReference(
         _ reference: WorkflowReference,
-        byID: [String: WorkflowNode],
-        descriptors: [String: ToolDescriptor]
+        byID: [String: WorkflowNode]
     ) throws {
         guard reference.source == .node, let node = reference.node else { return }
         try validateNodeExposedToFinal(node, byID: byID)
-        try validateOutputPath(
-            reference.path,
-            referencedNodeID: node,
-            currentNodeID: "final",
-            byID: byID,
-            descriptors: descriptors
-        )
+        try validateJSONPointerPath(reference.path, nodeID: "final")
     }
 
     private static func validateNodeExposedToFinal(
@@ -318,19 +282,6 @@ public enum WorkflowValidator {
                 reason: "node \(nodeID) output is not exposed to final rendering"
             )
         }
-    }
-
-    private static func validateOutputPath(
-        _ path: String,
-        referencedNodeID: String,
-        currentNodeID: String,
-        byID: [String: WorkflowNode],
-        descriptors: [String: ToolDescriptor]
-    ) throws {
-        _ = referencedNodeID
-        _ = byID
-        _ = descriptors
-        try validateJSONPointerPath(path, nodeID: currentNodeID)
     }
 
     private static func validateJSONPointerPath(_ path: String, nodeID: String) throws {

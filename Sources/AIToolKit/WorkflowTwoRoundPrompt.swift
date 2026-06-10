@@ -12,7 +12,7 @@ import FoundationModels
 ///   runtime fills it.
 /// - Harvested labels in authored text use `{{slot_id}}`.
 /// - The planner may use only listed tools.
-/// - The fixed worked examples are load-bearing; do not tailor them per task.
+/// - The single fixed worked example is load-bearing; do not tailor it per task.
 public enum WorkflowTwoRoundPrompt {
     public static let plannerVersion = "two_round.planner.v2.1"
     public static let binderVersion = "two_round.binder.v2.1"
@@ -67,23 +67,23 @@ public enum WorkflowTwoRoundPrompt {
         binder-only. Never invent contact/document/slot ids. Prefer the \
         smallest correct DAG.
 
-        \(plannerExamples())
+        \(plannerExample())
         """
     }
 
-    private static func plannerExamples() -> String {
+    /// One generic worked example. It deliberately exercises every semantic the
+    /// schema alone cannot teach: a named id resolved by a utility node and
+    /// consumed via `$ref`, a deictic value declared as a context slot and
+    /// consumed via `$slot`, a `{{slot_id}}` label token inside authored text,
+    /// and an unused optional set to `null`.
+    private static func plannerExample() -> String {
         """
-        Example A -- self-contained (the user named the contact):
+        Example -- one generic plan (adapt the tools/values to the actual \
+        request; never copy these literal values):
         {"nodes":[\
         {"id":"find_bob","tool":"find_contact","input":{"query":"Bob Singh"}},\
-        {"id":"send","tool":"send_message","input":{"contactID":{"$ref":{"source":"node","node":"find_bob","path":"/contactID"}},"body":"Hi Bob."}}\
-        ],"context_slots":[]}
-
-        Example B -- two deictic slots + a label token in the subject:
-        {"nodes":[\
-        {"id":"draft","tool":"create_email_draft","input":{"recipientContactID":{"$slot":"current_contact"},"subject":"About {{foreground_document}}","bodyDocumentID":{"$slot":"foreground_document"},"note":null}}\
+        {"id":"draft","tool":"create_email_draft","input":{"recipientContactID":{"$ref":{"source":"node","node":"find_bob","path":"/contactID"}},"subject":"About {{foreground_document}}","bodyDocumentID":{"$slot":"foreground_document"},"note":null}}\
         ],"context_slots":[\
-        {"slot_id":"current_contact","source":"current_contact"},\
         {"slot_id":"foreground_document","source":"foreground_document"}\
         ]}
         """
@@ -131,8 +131,8 @@ public enum WorkflowTwoRoundPrompt {
 
     // MARK: Shared
 
-    /// One compact line per tool: name, description, arguments schema, output
-    /// schema, side effect -- the manifest both rounds render.
+    /// One compact line per tool: name, description, arguments schema, and
+    /// output schema -- the manifest both rounds render.
     public static func renderManifest(_ descriptors: [ToolDescriptor]) -> String {
         descriptors.sorted { $0.name < $1.name }.map { descriptor in
             var line = "- \(descriptor.name): \(descriptor.description)"
@@ -141,9 +141,6 @@ public enum WorkflowTwoRoundPrompt {
             }
             if let output = descriptor.outputSchema, let text = try? output.jsonString() {
                 line += " Output schema: \(text)"
-            }
-            if let annotations = descriptor.annotations {
-                line += " Side effect: \(annotations.sideEffect.rawValue)."
             }
             return line
         }.joined(separator: "\n")

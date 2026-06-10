@@ -152,7 +152,12 @@ public struct WorkflowNode: Sendable, Equatable, Identifiable {
 }
 
 public struct WorkflowNodePolicy: Sendable, Equatable {
-    public static let defaultTimeoutMS = 20_000
+    /// By default a node carries no individual timeout (`0`): the workflow
+    /// deadline (`WorkflowLimits.deadlineMS`) is the governing bound, so a
+    /// slow-but-legitimate node (e.g. one that performs an internal model
+    /// call) is not killed by an arbitrary per-node cap. A plan can still set
+    /// `timeout_ms` per node to tighten this.
+    public static let defaultTimeoutMS = 0
 
     public enum OnError: String, Sendable, Codable, Hashable {
         case abort
@@ -227,26 +232,18 @@ public struct WorkflowRetryPolicy: Sendable, Codable, Hashable {
 }
 
 public struct WorkflowOutputPolicy: Sendable, Codable, Hashable {
-    public enum Redaction: String, Sendable, Codable, Hashable {
-        case none
-        case toolDefault = "tool_default"
-    }
-
     public var store: Bool
     public var exposeToFinal: Bool
     public var maxBytes: Int
-    public var redaction: Redaction
 
     public init(
         store: Bool = true,
         exposeToFinal: Bool = true,
-        maxBytes: Int = 65_536,
-        redaction: Redaction = .toolDefault
+        maxBytes: Int = 65_536
     ) {
         self.store = store
         self.exposeToFinal = exposeToFinal
         self.maxBytes = maxBytes
-        self.redaction = redaction
     }
 
     public static let `default` = WorkflowOutputPolicy()
@@ -255,7 +252,6 @@ public struct WorkflowOutputPolicy: Sendable, Codable, Hashable {
         case store
         case exposeToFinal = "expose_to_final"
         case maxBytes = "max_bytes"
-        case redaction
     }
 
     public init(from decoder: Decoder) throws {
@@ -263,14 +259,12 @@ public struct WorkflowOutputPolicy: Sendable, Codable, Hashable {
         self.store = try c.decodeIfPresent(Bool.self, forKey: .store) ?? true
         self.exposeToFinal = try c.decodeIfPresent(Bool.self, forKey: .exposeToFinal) ?? true
         self.maxBytes = try c.decodeIfPresent(Int.self, forKey: .maxBytes) ?? 65_536
-        self.redaction = try c.decodeIfPresent(Redaction.self, forKey: .redaction) ?? .toolDefault
     }
 
     public init(_ content: GeneratedContent) throws {
         self.store = content.optionalBool("store") ?? true
         self.exposeToFinal = content.optionalBool("expose_to_final") ?? true
         self.maxBytes = content.optionalInt("max_bytes") ?? 65_536
-        self.redaction = content.optionalString("redaction").flatMap(Redaction.init(rawValue:)) ?? .toolDefault
     }
 }
 
