@@ -27,4 +27,20 @@ public struct ToolDescriptor: Sendable, Identifiable {
         self.argumentsSchema = argumentsSchema
         self.outputSchema = outputSchema
     }
+
+    /// Derives a descriptor from any official FoundationModels tool, using the
+    /// official surface (`name`, `description`, `parameters`). The output
+    /// schema is included when the tool's `Output` is `Generable`.
+    public init(tool: some FoundationModels.Tool) {
+        self.init(
+            name: tool.name,
+            description: tool.description,
+            argumentsSchema: tool.parameters,
+            outputSchema: Self.outputSchema(of: tool)
+        )
+    }
+
+    private static func outputSchema<T: FoundationModels.Tool>(of tool: T) -> GenerationSchema? {
+        (T.Output.self as? any Generable.Type)?.generationSchema
+    }
 }

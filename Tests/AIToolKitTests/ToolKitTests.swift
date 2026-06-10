@@ -86,37 +86,44 @@ private func jsonData(_ value: some ConvertibleToGeneratedContent) -> Data {
     Data(value.generatedContent.jsonString.utf8)
 }
 
-private func generatedValue<Value: ConvertibleFromGeneratedContent>(
-    _ type: Value.Type = Value.self,
-    from data: Data
-) throws -> Value {
-    try Value(GeneratedContent(json: String(decoding: data, as: UTF8.self)))
-}
-
-@Suite struct ToolKitRegistryTests {
-    @Test func registerAndCall() async throws {
-        let registry = ToolRegistry()
-        await registry.register(EchoTool())
-        let input = jsonData(EchoTool.Arguments(text: "hi"))
-        let outData = try await registry.call(name: "echo", jsonArguments: input)
-        let output = try generatedValue(EchoTool.Output.self, from: outData)
-        #expect(output.echoed == "hi")
+@Suite struct ToolDispatchTests {
+    @Test func callToolRunsOfficialToolWithGeneratedContent() async throws {
+        let tool: any Tool = EchoTool()
+        let output = try await WorkflowExecutor.callTool(
+            tool,
+            with: .object(["text": .string("hi")])
+        )
+        #expect(output.optionalString("echoed") == "hi")
     }
 
-    @Test func manifestSubsetting() async {
-        let registry = ToolRegistry()
-        await registry.register(EchoTool())
-        let subset = await registry.manifest(for: ["echo"])
-        #expect(subset.map(\.name) == ["echo"])
-        let empty = await registry.manifest(for: [])
-        #expect(empty.isEmpty)
-    }
-
-    @Test func unknownToolThrows() async {
-        let registry = ToolRegistry()
-        await #expect(throws: ToolRegistryError.self) {
-            try await registry.call(name: "nope", jsonArguments: Data("{}".utf8))
+    @Test func callToolRejectsMismatchedArguments() async {
+        let tool: any Tool = EchoTool()
+        await #expect(throws: GenericToolError.self) {
+            _ = try await WorkflowExecutor.callTool(
+                tool,
+                with: .object(["text": .number(1)])
+            )
         }
+    }
+
+    @Test func executorRejectsUnknownToolAtDispatch() async {
+        let executor = WorkflowExecutor(tools: [EchoTool()])
+        await #expect(throws: WorkflowError.self) {
+            _ = try await executor.dispatch(
+                WorkflowNode(id: "missing", tool: "nope"),
+                .object([:]),
+                WorkflowExecutionContext()
+            )
+        }
+    }
+
+    @Test func descriptorsDeriveFromHeterogeneousOfficialTools() {
+        let tools: [any Tool] = [UppercaseTool(), EchoTool()]
+        let descriptors = tools
+            .map { ToolDescriptor(tool: $0) }
+            .sorted { $0.name < $1.name }
+        #expect(descriptors.map(\.name) == ["echo", "uppercase"])
+        #expect(descriptors.allSatisfy { $0.outputSchema != nil })
     }
 
     @Test func descriptorPreservesNameAndSchema() throws {
@@ -139,18 +146,13 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         #expect(output.echoed == "hi")
     }
 
-    @Test func toolRegistersAndUsesCallAsFunction() async throws {
-        let registry = ToolRegistry()
-        await registry.register(UppercaseTool())
-        let input = jsonData(UppercaseTool.Arguments(text: "hi"))
-        let outData = try await registry.call(name: "uppercase", jsonArguments: input)
-        let output = try generatedValue(UppercaseTool.Output.self, from: outData)
-        #expect(output.uppercased == "HI")
-
-        let callableOutput = try await UppercaseTool().callAsFunction(
-            UppercaseTool.Arguments(text: "go")
+    @Test func callToolReencodesOutputForRefWiring() async throws {
+        let tool: any Tool = UppercaseTool()
+        let output = try await WorkflowExecutor.callTool(
+            tool,
+            with: .object(["text": .string("hi")])
         )
-        #expect(callableOutput.uppercased == "GO")
+        #expect(output.optionalString("uppercased") == "HI")
     }
 
     @Test func generationSchemaObjectHasRequiredFields() throws {
@@ -212,23 +214,20 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
 }
 
 @Suite struct WorkflowKitTests {
-    @Test func workflowPromptCatalogIncludesArgumentsAndOutputSchemas() throws {
-        let prompt = WorkflowPromptBuilder.planningInstruction(
-            toolManifest: [SeedTool().descriptor]
-        )
-        #expect(prompt.contains("Arguments schema:"))
-        #expect(prompt.contains("\"value\""))
-        #expect(prompt.contains("Output schema:"))
+    @Test func workflowToolInstructionsIncludeArgumentsAndOutputSchemas() throws {
+        let instructions = WorkflowTool(tools: [SeedTool()]).instructions()
+        #expect(instructions.contains("Arguments schema:"))
+        #expect(instructions.contains("\"value\""))
+        #expect(instructions.contains("Output schema:"))
     }
 
-    @Test func workflowPromptIncludesOneGenericWorkedExample() throws {
-        let prompt = WorkflowPromptBuilder.planningInstruction(
-            toolManifest: [SeedTool().descriptor],
-            minimal: true,
-            includeExample: true
-        )
-        #expect(prompt.components(separatedBy: "Example WorkflowSpec").count == 2)
-        #expect(prompt.contains("\"$ref\""))
+    @Test func workflowToolInstructionsIncludeOneGenericWorkedExample() throws {
+        let instructions = WorkflowTool(tools: [SeedTool()]).instructions()
+        #expect(instructions.components(separatedBy: "Example workflow").count == 2)
+        #expect(instructions.contains("\"$ref\""))
+        // No harvester → the slot vocabulary must be absent entirely.
+        #expect(!instructions.contains("$slot"))
+        #expect(!instructions.contains("context_slots"))
     }
 
     @Test func workflowNodesDefaultToWorkflowDeadlineGovernedTimeout() throws {
@@ -244,10 +243,8 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     }
 
     @Test func validatesAndExecutesWorkflowDAG() async throws {
-        let registry = ToolRegistry()
-        await registry.register(SeedTool())
-        await registry.register(JoinTool())
-        let descriptors = await registry.registeredDescriptors()
+        let tools: [any Tool] = [SeedTool(), JoinTool()]
+        let descriptors = tools.map { ToolDescriptor(tool: $0) }
         let spec = WorkflowSpec(
             workflowID: "wf_join",
             intent: "Join two values.",
@@ -291,7 +288,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
             ["left", "right"], ["join_values"],
         ])
 
-        let result = try await WorkflowExecutor(registry: registry)
+        let result = try await WorkflowExecutor(tools: tools)
             .execute(validated)
         #expect(result.finalText == "a-b")
         #expect(result.finalValue.stringValue == "a-b")
@@ -333,9 +330,8 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     }
 
     @Test func rejectsInvalidLiteralArgumentsAtToolDispatch() async throws {
-        let registry = ToolRegistry()
-        await registry.register(SeedTool())
-        let descriptors = await registry.registeredDescriptors()
+        let tools: [any Tool] = [SeedTool()]
+        let descriptors = tools.map { ToolDescriptor(tool: $0) }
         let spec = WorkflowSpec(
             workflowID: "wf_bad_input",
             intent: "Bad literal input.",
@@ -353,15 +349,13 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
             policy: WorkflowValidationPolicy(descriptors: descriptors)
         )
         await #expect(throws: WorkflowError.self) {
-            _ = try await WorkflowExecutor(registry: registry).execute(validated)
+            _ = try await WorkflowExecutor(tools: tools).execute(validated)
         }
     }
 
     @Test func rejectsUnknownOutputPathAtExecution() async throws {
-        let registry = ToolRegistry()
-        await registry.register(SeedTool())
-        await registry.register(JoinTool())
-        let descriptors = await registry.registeredDescriptors()
+        let tools: [any Tool] = [SeedTool(), JoinTool()]
+        let descriptors = tools.map { ToolDescriptor(tool: $0) }
         let spec = WorkflowSpec(
             workflowID: "wf_bad_path",
             intent: "Bad reference path.",
@@ -391,7 +385,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
             policy: WorkflowValidationPolicy(descriptors: descriptors)
         )
         await #expect(throws: WorkflowError.self) {
-            _ = try await WorkflowExecutor(registry: registry).execute(validated)
+            _ = try await WorkflowExecutor(tools: tools).execute(validated)
         }
     }
 

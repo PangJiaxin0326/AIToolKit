@@ -27,15 +27,54 @@ public struct WorkflowExecutor: Sendable {
         self.dispatch = dispatch
     }
 
-    public init(registry: ToolRegistry) {
+    /// Dispatches workflow nodes by name to official FoundationModels tools —
+    /// the same `[any Tool]` currency a `LanguageModelSession` takes. With
+    /// duplicate names, the first tool wins.
+    public init(tools: [any Tool]) {
+        let toolsByName: [String: any Tool] = Dictionary(
+            tools.map { ($0.name, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         self.dispatch = { node, input, _ in
-            guard let tool = node.tool else {
+            guard let name = node.tool else {
                 throw WorkflowError.missingTool(nodeID: node.id)
             }
-            return try await registry.call(
-                ToolCall(id: "workflow-\(node.id)", name: tool, arguments: input)
+            guard let tool = toolsByName[name] else {
+                throw WorkflowError.unavailableTool(nodeID: node.id, tool: name)
+            }
+            return try await WorkflowExecutor.callTool(tool, with: input)
+        }
+    }
+
+    /// Runs one official tool with `GeneratedContent` arguments: opens the
+    /// existential, performs the strict typed-argument decode (a mismatched
+    /// input fails here, before the tool runs), and re-encodes the output so
+    /// later nodes can `$ref` into it. The output must convert to
+    /// `GeneratedContent` — every `Generable` output (including `String` and
+    /// other standard types) qualifies; a prompt-only output is rejected
+    /// because it cannot be wired into a DAG.
+    public static func callTool<T: Tool>(
+        _ tool: T,
+        with input: GeneratedContent
+    ) async throws -> GeneratedContent {
+        let arguments: T.Arguments
+        do {
+            arguments = try T.Arguments(input)
+        } catch {
+            throw GenericToolError(
+                message: "Arguments for tool \(tool.name) failed to decode: \(error)"
             )
         }
+        let output = try await tool.call(arguments: arguments)
+        guard let convertible = output as? any ConvertibleToGeneratedContent else {
+            throw GenericToolError(
+                message: """
+                Output of tool \(tool.name) does not convert to GeneratedContent; \
+                workflow node tools need structured (Generable) outputs.
+                """
+            )
+        }
+        return convertible.generatedContent
     }
 
     public func execute(

@@ -15,25 +15,21 @@ import OSLog
 /// when they run inside a `LanguageModelSession` driven by a `DynamicProfile`.
 public typealias Tool = FoundationModels.Tool
 
-extension FoundationModels.Tool where Arguments: Generable, Output: Generable {
-    public static var argumentsSchema: GenerationSchema { Arguments.generationSchema }
-    public static var outputSchema: GenerationSchema { Output.generationSchema }
-
-    /// Provider-facing descriptor derived from this tool's FoundationModels
-    /// metadata and the `GenerationSchema`s supplied by its types.
+extension FoundationModels.Tool {
+    /// Provider-facing descriptor derived from this tool's official surface.
     public var descriptor: ToolDescriptor {
-        ToolDescriptor(
-            name: name,
-            description: description,
-            argumentsSchema: parameters,
-            outputSchema: Self.outputSchema
-        )
+        ToolDescriptor(tool: self)
     }
 
     /// Callable shorthand matching Swift's call-as-function convention.
     public func callAsFunction(_ arguments: Arguments) async throws -> Output {
         try await call(arguments: arguments)
     }
+}
+
+extension FoundationModels.Tool where Arguments: Generable, Output: Generable {
+    public static var argumentsSchema: GenerationSchema { Arguments.generationSchema }
+    public static var outputSchema: GenerationSchema { Output.generationSchema }
 }
 
 /// Errors thrown by tools carry retriability so the ErrorHandler can decide
@@ -53,20 +49,9 @@ public struct GenericToolError: ToolError {
     }
 }
 
-/// A parsed request from the model to call a tool.
-public struct ToolCall: Sendable, Equatable {
-    public var id: String?
-    public var name: String
-    public var arguments: GeneratedContent
-
-    public init(id: String? = nil, name: String, arguments: GeneratedContent) {
-        self.id = id
-        self.name = name
-        self.arguments = arguments
-    }
-}
-
-/// Errors from the registry dispatch path itself.
+/// Errors from registry dispatch paths (`ViewToolRegistry`). Data tools no
+/// longer use a registry: pass them to a `LanguageModelSession` (or a
+/// `WorkflowTool`) directly.
 public enum ToolRegistryError: Error, Sendable {
     case notRegistered(String)
     case decodingFailed(name: String, detail: String)

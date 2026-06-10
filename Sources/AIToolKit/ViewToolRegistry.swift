@@ -2,9 +2,11 @@ import Foundation
 import FoundationModels
 import SwiftUI
 
-/// Process-wide registry for `ViewTool`s. Parallels `ToolRegistry` but its
-/// dispatch path produces an `AnyView` rather than encoded `Data`, because
-/// the host renders the result directly.
+/// Process-wide registry for `ViewTool`s. Data tools go straight into a
+/// `LanguageModelSession` (or a `WorkflowTool`), but view tools cannot — their
+/// output is a SwiftUI view, which is not prompt-representable — so they keep
+/// a registry whose dispatch path produces an `AnyView` the host renders
+/// directly.
 ///
 /// Main-actor-isolated: SwiftUI view construction is main-isolated, and the
 /// registry stays in step so registration and dispatch share the same
