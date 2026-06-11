@@ -148,3 +148,60 @@ public struct ScopedWorkflowProfile: LanguageModelSession.DynamicProfile {
         return available.filter { lowered.contains($0.lowercased()) }
     }
 }
+
+/// Host-side stop for the work step: ends the session the moment its work
+/// is done — no completion signal from the model, no closing text turn.
+///
+/// Feed it from the profile hooks. The runtime fires ALL of a parallel
+/// batch's `onToolCall`s before the first tool executes (verified on the
+/// OS 27 SDK), so the monitor can tell when a turn is fully executed
+/// without ever cancelling a batched sibling call:
+///
+/// ```swift
+/// .onToolCall  { call in if inWorkStep { monitor.recordCall(call) } … }
+/// .onToolOutput { call, _ in
+///     if inWorkStep, monitor.recordOutput(call) { throw WorkflowStageComplete() }
+/// }
+/// ```
+///
+/// Completion = the current turn's outputs all landed AND at least one of
+/// them came from a finishing (user-visible action) tool. A turn of pure
+/// lookups never stops the session; a model that replies in text instead of
+/// acting (a refusal) simply ends the respond normally.
+public final class WorkTurnMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    private let finishingNames: Set<String>
+    private var callsInTurn = 0
+    private var outputsInTurn = 0
+    private var finishingOutputsInTurn = 0
+
+    public init(finishingToolNames: some Sequence<String>) {
+        self.finishingNames = Set(finishingToolNames)
+    }
+
+    /// Call from `onToolCall`. Starts a new turn when the previous one is
+    /// fully executed.
+    public func recordCall(_ call: Transcript.ToolCall) {
+        lock.lock()
+        defer { lock.unlock() }
+        if outputsInTurn == callsInTurn {
+            callsInTurn = 0
+            outputsInTurn = 0
+            finishingOutputsInTurn = 0
+        }
+        callsInTurn += 1
+    }
+
+    /// Call from `onToolOutput`. Returns `true` the moment the work is done
+    /// — the turn is fully executed and performed at least one finishing
+    /// action — i.e. the moment to throw `WorkflowStageComplete`.
+    public func recordOutput(_ call: Transcript.ToolCall) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        outputsInTurn += 1
+        if finishingNames.contains(call.toolName) {
+            finishingOutputsInTurn += 1
+        }
+        return outputsInTurn == callsInTurn && finishingOutputsInTurn > 0
+    }
+}
