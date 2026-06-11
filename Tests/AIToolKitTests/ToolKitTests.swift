@@ -211,6 +211,59 @@ private func jsonData(_ value: some ConvertibleToGeneratedContent) -> Data {
             )
         }
     }
+
+    /// The lean planner contract (v2.2) omits `"source"`; it defaults to
+    /// "node". A `$ref` with neither `source` nor `node` is not a reference.
+    @Test func referenceResolverDefaultsOmittedSourceToNode() throws {
+        let leanInput: GeneratedContent = .object([
+            "value": .object(["$ref": .object([
+                "node": .string("source"),
+                "path": .string("/value"),
+            ])]),
+        ])
+        let resolved = try WorkflowReferenceResolver.resolve(
+            leanInput,
+            outputs: ["source": .object(["value": .string("ok")])],
+            currentNodeID: "consumer"
+        )
+        #expect(resolved == .object(["value": .string("ok")]))
+        #expect(WorkflowReferenceResolver.references(in: leanInput).count == 1)
+
+        let notARef: GeneratedContent = .object([
+            "value": .object(["$ref": .object(["path": .string("/value")])]),
+        ])
+        #expect(WorkflowReferenceResolver.references(in: notARef).isEmpty)
+    }
+
+    /// The compact string `$ref` taught by the v2.2 contract:
+    /// "node/pointer" → node + "/pointer"; a bare node id → whole output;
+    /// a leading slash is not a node reference.
+    @Test func referenceResolverParsesCompactStringRef() throws {
+        let compact: GeneratedContent = .object([
+            "value": .object(["$ref": .string("source/value")]),
+        ])
+        let resolved = try WorkflowReferenceResolver.resolve(
+            compact,
+            outputs: ["source": .object(["value": .string("ok")])],
+            currentNodeID: "consumer"
+        )
+        #expect(resolved == .object(["value": .string("ok")]))
+
+        let whole: GeneratedContent = .object([
+            "value": .object(["$ref": .string("source")]),
+        ])
+        let wholeResolved = try WorkflowReferenceResolver.resolve(
+            whole,
+            outputs: ["source": .object(["value": .string("ok")])],
+            currentNodeID: "consumer"
+        )
+        #expect(wholeResolved == .object(["value": .object(["value": .string("ok")])]))
+
+        let pathOnly: GeneratedContent = .object([
+            "value": .object(["$ref": .string("/value")]),
+        ])
+        #expect(WorkflowReferenceResolver.references(in: pathOnly).isEmpty)
+    }
 }
 
 @Suite struct WorkflowKitTests {

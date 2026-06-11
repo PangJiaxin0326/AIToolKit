@@ -125,7 +125,62 @@ public enum TwoRoundValue {
         }
     }
 
-    // MARK: `{{slot_id}}` label tokens
+    // MARK: `{{slot_id}}` / `{{node/path}}` text tokens
+
+    /// Canonicalizes a marker/token string that *spells* a node-output
+    /// reference — `d1/hits/0/title`, `$ref:d1/hits/0/title`,
+    /// `$ref.d1.hits.0.title`, `d1.hits.0.title` — to the canonical
+    /// `<node id>/<json pointer>` form. Returns `nil` when the string cannot
+    /// be read as a reference to one of `nodeIDs` (so a plain slot id is
+    /// never touched). Deterministic: a slot id cannot contain `/`, and the
+    /// `$ref`-prefixed spellings have no other reading.
+    public static func canonicalNodePath(_ raw: String, nodeIDs: Set<String>) -> String? {
+        var s = raw.trimmingCharacters(in: .whitespaces)
+        for prefix in ["$ref:", "$ref."] where s.hasPrefix(prefix) {
+            s = String(s.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+            break
+        }
+        if let slash = s.firstIndex(of: "/"), nodeIDs.contains(String(s[..<slash])) {
+            return s
+        }
+        // Dotted form (`d1.hits.0.title`): only one reading when the first
+        // segment is an existing node id.
+        if !s.contains("/"), s.contains(".") {
+            let parts = s.split(separator: ".").map(String.init)
+            if let head = parts.first, nodeIDs.contains(head) {
+                return parts.joined(separator: "/")
+            }
+        }
+        return nil
+    }
+
+    /// The label tokens in `value` that reference a node's output
+    /// (`{{<node id>/<path>}}`, canonical form) rather than a context slot.
+    public static func nodeOutputTokens(
+        in value: GeneratedContent, nodeIDs: Set<String>
+    ) -> Set<String> {
+        labelTokens(in: value).filter { isNodeOutputToken($0, nodeIDs: nodeIDs) }
+    }
+
+    /// Whether a (canonical) token is `<node id>/<path>` over `nodeIDs`.
+    public static func isNodeOutputToken(_ token: String, nodeIDs: Set<String>) -> Bool {
+        guard let slash = token.firstIndex(of: "/") else { return false }
+        return nodeIDs.contains(String(token[..<slash]))
+    }
+
+    /// Rewrites every `{{…}}` token in the value's strings to its canonical
+    /// node-path form where one exists (`{{$ref.d1.hits.0.title}}` →
+    /// `{{d1/hits/0/title}}`). Slot tokens and unreadable tokens are left
+    /// intact.
+    public static func canonicalizeNodeTokens(
+        in value: GeneratedContent, nodeIDs: Set<String>
+    ) -> GeneratedContent {
+        resolveLabels(in: value) { raw in
+            guard let canonical = canonicalNodePath(raw, nodeIDs: nodeIDs),
+                  canonical != raw else { return nil }
+            return "{{\(canonical)}}"
+        }
+    }
 
     /// Every `{{slot_id}}` token referenced anywhere in a value's strings.
     public static func labelTokens(in value: GeneratedContent) -> Set<String> {
@@ -304,13 +359,18 @@ public struct WorkflowPlan: Sendable, Equatable {
     /// Effective outcome derived from *structure* rather than the label: a plan
     /// with no slot placeholders, label tokens, or declarations is
     /// self-contained even if the model said "requires_binding". `cannot_plan`
-    /// is always honoured.
+    /// is always honoured. A `{{node/path}}` text token references a node
+    /// output (resolved at execution), not local context, so it does not make
+    /// a plan require binding.
     public var effectiveOutcome: Outcome {
         if outcome == .cannotPlan { return .cannotPlan }
+        let nodeIDs = Set(nodes.map(\.id))
         let hasSlots = !contextSlots.isEmpty
-            || nodes.contains {
-                !TwoRoundValue.slotIDs(in: $0.input).isEmpty
-                    || !TwoRoundValue.labelTokens(in: $0.input).isEmpty
+            || nodes.contains { node in
+                if !TwoRoundValue.slotIDs(in: node.input).isEmpty { return true }
+                return TwoRoundValue.labelTokens(in: node.input).contains {
+                    !TwoRoundValue.isNodeOutputToken($0, nodeIDs: nodeIDs)
+                }
             }
         return hasSlots ? .requiresBinding : .selfContained
     }

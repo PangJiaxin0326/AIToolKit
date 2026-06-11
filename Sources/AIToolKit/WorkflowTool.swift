@@ -97,7 +97,11 @@ public struct WorkflowTool: Tool {
         // Round 1, or a plain one-shot plan.
         let plan: WorkflowPlan
         do {
-            plan = try WorkflowPlan(arguments)
+            // Deterministic repairs first (mis-tagged node refs, forward
+            // refs, inlined slot declarations) — no-ops on plans that would
+            // already validate.
+            plan = WorkflowTwoRoundCompiler.normalizePlan(
+                try WorkflowPlan(arguments), recognizedSources: Set(sources))
             try WorkflowTwoRoundCompiler.validatePlan(
                 plan,
                 availableTools: Set(descriptors.map(\.name)),
@@ -270,13 +274,18 @@ public struct WorkflowTool: Tool {
             workflow object. Do not call the other tools directly.
 
             A workflow is a topological DAG. Emit a `nodes` array; each node \
-            has exactly three fields: id, tool, input — omit everything else. \
-            `input` holds ONLY that tool's own parameters — never put id, \
-            tool, or depends_on inside input. Put independent source nodes \
-            first; a node depends on another only by referencing its output \
-            in `input` with {"$ref":{"source":"node","node":"node_id",\
-            "path":"/field"}} (JSON Pointer). Do not copy intermediate \
-            outputs; reference them. The app executes the DAG locally.
+            has exactly three fields: id, tool, input — omit everything else \
+            and keep node ids short. `input` holds ONLY that tool's own \
+            parameters — never put id, tool, or depends_on inside input, and \
+            omit optional parameters you don't use (no null filler). Put \
+            independent source nodes first; a node depends on another only by \
+            referencing its output in `input` with \
+            {"$ref":"<node id>/<field>"} (id, then a JSON Pointer). Do not \
+            copy intermediate outputs; reference them. The app executes the \
+            DAG locally — ONCE, exactly as emitted. Include every node \
+            needed to fully complete the request, ending with the action \
+            node(s) the user asked for; a plan that stops after lookups \
+            accomplishes nothing.
             """)
         if !sources.isEmpty {
             sections.append("""
@@ -295,9 +304,9 @@ public struct WorkflowTool: Tool {
             Example workflow (general template — adapt the tools/values to \
             the actual request; never copy these literal values):
             {"nodes":[\
-            {"id":"find_bob","tool":"find_contact","input":{"query":"Bob Singh"}},\
-            {"id":"send","tool":"send_message","input":{"contactID":{"$ref":\
-            {"source":"node","node":"find_bob","path":"/contactID"}},"body":"Hi Bob."}}\
+            {"id":"f","tool":"find_contact","input":{"query":"Bob Singh"}},\
+            {"id":"send","tool":"send_message","input":{"contactID":\
+            {"$ref":"f/contactID"},"body":"Hi Bob."}}\
             ]}
             """)
         if !sources.isEmpty {

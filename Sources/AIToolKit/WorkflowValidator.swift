@@ -140,6 +140,7 @@ public enum WorkflowValidator {
         }
 
         var dependencies: [String: Set<String>] = [:]
+        let allNodeIDs = Set(spec.nodes.map(\.id))
         for (index, node) in spec.nodes.enumerated() {
             var nodeDependencies = Set(node.dependsOn)
             for reference in WorkflowReferenceResolver.references(in: node.input) {
@@ -147,6 +148,14 @@ public enum WorkflowValidator {
                 if reference.source == .node, let referencedNode = reference.node {
                     nodeDependencies.insert(referencedNode)
                     try validateJSONPointerPath(reference.path, nodeID: node.id)
+                }
+            }
+            // `{{<node id>/<path>}}` text-interpolation tokens are dependency
+            // edges too — the referenced output must exist before this node
+            // runs for the executor to substitute it.
+            for token in TwoRoundValue.nodeOutputTokens(in: node.input, nodeIDs: allNodeIDs) {
+                if let slash = token.firstIndex(of: "/") {
+                    nodeDependencies.insert(String(token[..<slash]))
                 }
             }
             for dependency in nodeDependencies {
@@ -297,11 +306,12 @@ public enum WorkflowValidator {
         !value.isEmpty && value.count <= 128
     }
 
+    /// Node ids are opaque wiring keys (`[a-z0-9_]{1,64}`). Letter-first is
+    /// the *taught* style, but a digit-leading id a model emits anyway is
+    /// unambiguously interpretable, so rejecting the whole plan over it costs
+    /// a run for a pure style violation — accept it.
     public static func isValidNodeID(_ value: String) -> Bool {
-        guard let first = value.unicodeScalars.first,
-              first.value >= 97 && first.value <= 122,
-              value.count <= 64
-        else { return false }
+        guard !value.isEmpty, value.count <= 64 else { return false }
         return value.unicodeScalars.allSatisfy { scalar in
             (scalar.value >= 97 && scalar.value <= 122)
                 || (scalar.value >= 48 && scalar.value <= 57)

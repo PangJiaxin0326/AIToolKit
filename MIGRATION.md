@@ -114,18 +114,19 @@ in the loop rather than thrown errors. The full status vocabulary:
 `completed`, `needs_binding`, `needs_clarification`, `cannot_plan`,
 `invalid_plan`, `invalid_binding`, `stale_binding`, `failed`.
 
-### When to keep your isolated runner instead
+### When to use the isolated built-in pair instead
 
-The collapsed tool trades away two properties of the split design. Keep
-driving `WorkflowTwoRoundCompiler` from your own runner (e.g. AIKit's
-`WorkflowTwoRoundRunner`) if you need:
+The collapsed tool trades away two properties of the split design. Use AIKit's
+built-in tool pair (`WorkflowPlanTool` → `WorkflowExecuteTool`, which drive
+`WorkflowTwoRoundCompiler` host-side) if you need:
 
 - **Strict round isolation** — with `WorkflowTool`, candidate *labels* enter
-  the shared session transcript (values still never do). The runner keeps the
-  planner blind to context and the binder in a separate request with tailored
-  instructions.
-- **A host interception point between rounds** — the runner can show a native
-  candidate picker or consult `WorkflowPlanCache` to skip the planner call
+  the shared session transcript (values still never do). The built-in pair
+  keeps the planner blind to context and the binder in a separate request with
+  tailored instructions.
+- **A host interception point between rounds** — between `plan(intent:)` and
+  `execute(plan:)` the host can show a native candidate picker, and
+  `WorkflowPlanTool` consults `WorkflowPlanCache` to skip the planner call
   entirely. `WorkflowTool` cannot pause the session loop, and it does not
   consult the plan cache (the plan arrives as already-spent model output).
 

@@ -102,9 +102,9 @@ private state are `$slot` holes declared in `context_slots`. One
 
 Hosts that need strict round isolation (planner and binder as separate LLM
 requests), a native candidate-picker between rounds, or `WorkflowPlanCache`
-planner-skipping keep driving the pure `WorkflowTwoRoundCompiler` from their
-own runner (AIKit's `WorkflowTwoRoundRunner`); both paths share every
-validation and execution stage.
+planner-skipping drive AIKit's built-in tool pair (`WorkflowPlanTool` →
+`WorkflowExecuteTool`) host-side instead; both paths share every validation
+and execution stage.
 
 Migrating from `ToolRegistry` / `WorkflowSchema` / the synthetic
 `workflow_run` descriptor? See [MIGRATION.md](MIGRATION.md).

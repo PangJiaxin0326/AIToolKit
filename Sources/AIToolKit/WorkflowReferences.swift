@@ -63,7 +63,28 @@ public enum WorkflowReferenceResolver {
                     currentNodeID: currentNodeID
                 )
             })
-        case .null, .bool, .number, .string:
+        case .string(let s):
+            // Text interpolation: a `{{<node id>/<path>}}` token embeds an
+            // earlier node's output *inside* a string (a `$ref` can only
+            // replace the whole field). Tokens that don't resolve — not a
+            // node output, bad pointer — are left intact rather than thrown:
+            // by execution time any slot tokens were already substituted at
+            // bind, so an unresolved token degrades to literal text instead
+            // of failing the node.
+            guard s.contains("{{") else { return value }
+            return TwoRoundValue.resolveLabels(in: value) { token in
+                guard let slash = token.firstIndex(of: "/") else { return nil }
+                guard let root = outputs[String(token[..<slash])] else { return nil }
+                let resolved = try? resolvePointer(
+                    String(token[slash...]),
+                    in: root,
+                    currentNodeID: currentNodeID,
+                    display: "node:\(token)"
+                )
+                guard let resolved else { return nil }
+                return WorkflowFinalRenderer.displayString(resolved)
+            }
+        case .null, .bool, .number:
             return value
         @unknown default:
             return value
@@ -112,14 +133,40 @@ public enum WorkflowReferenceResolver {
     }
 
     static func referenceObject(_ object: [String: GeneratedContent]) -> WorkflowReference? {
-        guard object.count == 1,
-              case .structure(let raw, _)? = object["$ref"]?.kind,
-              case .string(let sourceRaw)? = raw["source"]?.kind,
-              let source = WorkflowReference.Source(rawValue: sourceRaw)
-        else { return nil }
-        let node = raw["node"]?.stringValue
-        let path = raw["path"]?.stringValue ?? ""
-        return WorkflowReference(source: source, node: node, path: path)
+        guard object.count == 1, let ref = object["$ref"] else { return nil }
+        switch ref.kind {
+        case .string(let compact):
+            // Compact node reference (the v2.2 planner contract's taught
+            // form): "<node id>/<json pointer>" — "f/contactID" means node
+            // "f", path "/contactID"; a bare "f" means the whole output.
+            guard !compact.isEmpty, !compact.hasPrefix("/") else { return nil }
+            if let slash = compact.firstIndex(of: "/") {
+                let node = String(compact[..<slash])
+                let path = String(compact[slash...])
+                guard !node.isEmpty else { return nil }
+                return WorkflowReference(source: .node, node: node, path: path)
+            }
+            return WorkflowReference(source: .node, node: compact, path: "")
+        case .structure(let raw, _):
+            // Canonical object form. `source` defaults to "node" — the
+            // overwhelmingly common case, and the one the lean planner
+            // contract omits to save output tokens. A `$ref` with neither
+            // `source` nor `node` is not a reference.
+            let source: WorkflowReference.Source
+            if case .string(let sourceRaw)? = raw["source"]?.kind {
+                guard let parsed = WorkflowReference.Source(rawValue: sourceRaw) else { return nil }
+                source = parsed
+            } else if raw["node"] != nil {
+                source = .node
+            } else {
+                return nil
+            }
+            let node = raw["node"]?.stringValue
+            let path = raw["path"]?.stringValue ?? ""
+            return WorkflowReference(source: source, node: node, path: path)
+        default:
+            return nil
+        }
     }
 
     static func display(_ reference: WorkflowReference) -> String {

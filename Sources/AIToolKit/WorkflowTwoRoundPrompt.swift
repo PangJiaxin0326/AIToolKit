@@ -3,18 +3,23 @@ import FoundationModels
 
 /// Versioned planner/binder instructions for the two-round-trip compiler.
 /// Prompts are product assets: version them and re-run golden traces when they
-/// change. The lean v2.1 planner contract is:
+/// change. The lean v2.2 planner contract is:
 ///
-/// - Normal output emits only `nodes` and `context_slots`.
-/// - A node is `{id, tool, input}`; a slot is `{slot_id, source}`.
-/// - Dependencies are `$ref` JSON Pointers, not copied upstream values.
+/// - Normal output emits only `nodes` and `context_slots` (omit the latter
+///   when empty).
+/// - A node is `{id, tool, input}` with a short id; a slot is
+///   `{slot_id, source}`. Unused optional params are omitted, never null.
+/// - Dependencies are `$ref` JSON Pointers, not copied upstream values; the
+///   lean form omits `"source"` (defaults to "node").
+/// - The plan must END with the action node(s) that complete the request —
+///   one pass, no continuation (the completeness guard rail).
 /// - Local deictic state becomes `$slot` plus a declared context slot; the
 ///   runtime fills it.
 /// - Harvested labels in authored text use `{{slot_id}}`.
 /// - The planner may use only listed tools.
 /// - The single fixed worked example is load-bearing; do not tailor it per task.
 public enum WorkflowTwoRoundPrompt {
-    public static let plannerVersion = "two_round.planner.v2.1"
+    public static let plannerVersion = "two_round.planner.v2.3"
     public static let binderVersion = "two_round.binder.v2.1"
 
     // MARK: Round-1 Planner
@@ -28,39 +33,56 @@ public enum WorkflowTwoRoundPrompt {
         calls. Output ONLY one JSON object (no prose, no code fence).
 
         Normal path output shape is exactly:
-        {"nodes":[...],"context_slots":[...]}
-        Do NOT include outcome, intent_summary, or message on the normal path; \
-        the runtime derives the outcome from structure. Use outcome ONLY to \
-        refuse: {"outcome":"cannot_plan","message":"short reason","nodes":[],\
-        "context_slots":[]}.
+        {"nodes":[...]}
+        plus a "context_slots":[...] key ONLY when declaring slots. Do NOT \
+        include outcome, intent_summary, or message on the normal path; the \
+        runtime derives the outcome from structure. Use outcome ONLY to \
+        refuse: {"outcome":"cannot_plan","message":"short reason","nodes":[]}.
 
-        Each node is {id, tool, input}. `input` holds ONLY that tool's own \
-        parameters; never put id, tool, or depends_on inside input. A node \
-        depends on another by referencing its output: \
-        {"$ref":{"source":"node","node":"<id>","path":"/field"}} (JSON Pointer). \
-        Put source nodes before the nodes that consume them; do not copy an \
+        Each node is {id, tool, input}; keep node and slot ids short. `input` \
+        holds ONLY that tool's own parameters; never put id, tool, or \
+        depends_on inside input, and OMIT optional parameters you don't use \
+        (no null filler). A node depends on another by referencing its \
+        output: {"$ref":"<node id>/<field>"} (id, then a JSON Pointer). Put \
+        source nodes before the nodes that consume them; do not copy an \
         upstream value, reference it.
+
+        The plan executes ONCE, exactly as emitted -- there is no second pass \
+        to continue it. Include EVERY node needed to fully complete the \
+        request, ending with the action node(s) the user asked for (the \
+        draft/send/schedule/commit tool). A plan that stops after lookups \
+        accomplishes nothing. You never see intermediate outputs, so never \
+        stop to inspect them; pick a list element by index using the tool's \
+        documented ordering (e.g. /hits/0 for the best/most recent match).
 
         Use ONLY the tools listed under "Available tools" -- never name another. \
         Resolve an id the user NAMED (a contact name, a doc title) with a listed \
         utility tool as a node.
 
-        Never slot anything obtainable another way. Put named text in a \
-        body/subject literally, or via the SAME deictic slot's {{slot_id}} token; \
-        never create a separate title slot.
+        Never slot anything obtainable another way. A context slot is ONLY \
+        for a deictic reference to unseen device state; if the user already \
+        NAMED the contact/document, write its name literally in text (or \
+        resolve its id with a utility node) and do not declare any slot for \
+        it or its title. To name a DEICTIC slot's content in text, use the \
+        SAME slot's {{slot_id}} token, never a separate title slot.
 
         For a value that depends on LOCAL DEVICE STATE the user referred to \
         deictically -- "the contact I'm viewing", "this document", "my default \
         slot" -- do NOT invent or fetch the id. Put {"$slot":"<slot_id>"} in that \
         input field and declare the slot as {"slot_id":"<slot_id>",\
-        "source":"<source>"} in `context_slots`. A slot source must be EXACTLY \
-        one of these source names -- never dotted or derived: \(sourceList). A \
-        later local step fills it.
+        "source":"<source>"} in `context_slots`. Every used slot_id must be \
+        declared. A slot source must be EXACTLY one of these source names -- \
+        never dotted or derived: \(sourceList). A later local step fills it.
 
-        {{ }} wraps ONLY a declared slot_id -- never a $ref, node id, or \
+        {{ }} wraps ONLY a declared slot_id -- never a $ref, node id, path, or \
         expression. A $ref replaces the WHOLE field value; it cannot be embedded \
         in a sentence. If text is already in the user's request, write it \
         literally.
+
+        When a parameter's value is DERIVED from an earlier node's output (a \
+        computed size, count, date, or formatted string), wire it with $ref \
+        to the node that computes that value -- never substitute a guessed or \
+        typical constant for it.
 
         Every interactive node must keep its required id fields bound by $slot, \
         $ref, or a literal. Never put null in a required id field. $bind is \
@@ -73,18 +95,19 @@ public enum WorkflowTwoRoundPrompt {
 
     /// One generic worked example. It deliberately exercises every semantic the
     /// schema alone cannot teach: a named id resolved by a utility node and
-    /// consumed via `$ref`, a deictic value declared as a context slot and
-    /// consumed via `$slot`, a `{{slot_id}}` label token inside authored text,
-    /// and an unused optional set to `null`.
+    /// consumed via the compact string `$ref`, a deictic value declared as a
+    /// short-id context slot and consumed via `$slot`, a `{{slot_id}}` label
+    /// token inside authored text, omitted unused optionals, and a plan that
+    /// ends with the action node that completes the request.
     private static func plannerExample() -> String {
         """
         Example -- one generic plan (adapt the tools/values to the actual \
         request; never copy these literal values):
         {"nodes":[\
-        {"id":"find_bob","tool":"find_contact","input":{"query":"Bob Singh"}},\
-        {"id":"draft","tool":"create_email_draft","input":{"recipientContactID":{"$ref":{"source":"node","node":"find_bob","path":"/contactID"}},"subject":"About {{foreground_document}}","bodyDocumentID":{"$slot":"foreground_document"},"note":null}}\
+        {"id":"f","tool":"find_contact","input":{"query":"Bob Singh"}},\
+        {"id":"d","tool":"create_email_draft","input":{"recipientContactID":{"$ref":"f/contactID"},"subject":"About {{doc}}","bodyDocumentID":{"$slot":"doc"}}}\
         ],"context_slots":[\
-        {"slot_id":"foreground_document","source":"foreground_document"}\
+        {"slot_id":"doc","source":"foreground_document"}\
         ]}
         """
     }
@@ -104,7 +127,8 @@ public enum WorkflowTwoRoundPrompt {
         not add, remove, rename, or reorder nodes. For each input field that is \
         {"$slot":"<slot_id>"}, replace it with {"$bind":"<candidate_id>"}, \
         choosing a candidate for that slot from the packet. Keep \
-        {"$ref":{"source":"node",...}} references exactly as given.
+        {"$ref":...} references and {{<node id>/<path>}} text tokens exactly \
+        as given.
 
         When a literal TEXT field (a body or subject) refers generically to \
         harvested content -- "the document you have open", "the open doc" -- \
