@@ -8,19 +8,22 @@ import FoundationModels
 // selection*:
 //
 // - **scope** — the user intent plus the *finishing* (user-visible) tool
-//   catalogue. The model's only job is to name the finishing tools the
-//   request needs, through one `select_tools` call. The host aborts the turn
-//   the moment that call arrives (a throwing `onToolCall` hook), so the step
-//   costs exactly one LLM round and nothing executes.
+//   catalogue, with tool calling DISALLOWED (`tool_choice: none` on an
+//   OpenAI-style wire): the manifests are visible but nothing can execute,
+//   and the model answers in plain text with the needed tool names — a
+//   handful of output tokens, where even a minimal tool-call envelope
+//   costs ~30+. One LLM round, ended by its own short text turn; the host
+//   parses the names with `parseSelection`.
 // - **work** — the selected finishing tools plus only the assistive unit
 //   requests *registered on them* (`ScopedFinishingTool`). All lookups and
 //   all actions happen here. The user intent is re-sent; a cut-index
 //   `historyTransform` drops every scope-step entry, so the catalogue and
-//   the selection chatter never re-enter the context.
+//   the selection chatter never re-enter the context. The host ends the
+//   step in code via `WorkTurnMonitor` the moment a fully-executed turn
+//   contains a finishing output.
 //
 // The selection is the ONLY thing that crosses the stage boundary, and it
-// crosses host-side (recorded in the `onToolCall` hook) — no model summary,
-// no transcript carry-over.
+// crosses host-side — no model summary, no transcript carry-over.
 
 /// Which step of the scoped workflow the session is in.
 public enum ScopedWorkflowStage: String, Sendable, Hashable, CaseIterable {
@@ -51,46 +54,6 @@ public protocol ScopedFinishingTool: Tool {
     var registeredAssistiveTools: [any Tool] { get }
 }
 
-/// The scope step's single signal: one text argument carrying the names of
-/// the finishing tools the request needs. Its `call` never actually runs —
-/// the host's `onToolCall` hook reads the argument and aborts the turn.
-public struct SelectToolsTool: AssistiveTool {
-    public typealias Arguments = TextArgument
-
-    public static let toolName = "select_tools"
-    public var name: String { Self.toolName }
-    public let description = """
-    Declare which task tools are needed to complete the user's request. \
-    Input: the tool names as a comma-separated list, e.g. \
-    "create_email_draft, schedule_event". Call exactly once, with every \
-    tool the request requires — and call no other tool.
-    """
-
-    public init() {}
-
-    public func call(arguments: TextArgument) async throws -> String {
-        "tools selected"
-    }
-}
-
-/// Sentinel thrown out of the scope step's `respond(...)` the moment
-/// `select_tools` is called: the selection is recorded host-side and the
-/// step needs no tool execution and no closing text turn.
-public struct ScopeSelectionComplete: Error, Sendable {
-    public init() {}
-}
-
-/// Thrown when the model calls a real tool during the scope step — the
-/// throwing `onToolCall` hook fires before the tool executes, so the
-/// premature action is blocked, not performed. Hosts recover with one
-/// corrective respond.
-public struct ScopeStepViolation: Error, Sendable {
-    public let toolName: String
-    public init(toolName: String) {
-        self.toolName = toolName
-    }
-}
-
 /// The scoped workflow profile. Stage-switched like `WorkflowProfile`; the
 /// work step's tool set is produced per request by a closure, because it is
 /// derived from the scope step's runtime selection.
@@ -101,46 +64,71 @@ public struct ScopedWorkflowProfile: LanguageModelSession.DynamicProfile {
     private let workInstructions: @Sendable () -> String
     private let catalogue: [any Tool]
     private let workTools: @Sendable () -> [any Tool]
+    private let scopeResponseTokenCap: Int
 
     /// - Parameters:
-    ///   - scopeInstructions: Scope-step instructions (select, don't act).
+    ///   - scopeInstructions: Scope-step instructions (name the tools in
+    ///     plain text, nothing else).
     ///   - workInstructions: Work-step instructions, evaluated per request —
     ///     inject local deictic state here.
-    ///   - catalogue: The full finishing-tool catalogue plus
-    ///     `SelectToolsTool` — what the scope step sees.
+    ///   - catalogue: The full finishing-tool catalogue — what the scope
+    ///     step sees (visible, not callable).
     ///   - workTools: The work step's tool set, evaluated per request: the
-    ///     selected finishing tools, their registered assistive tools, and
-    ///     `TaskCompleteTool`.
+    ///     selected finishing tools plus their registered assistive tools.
+    ///   - scopeResponseTokenCap: Output budget for the scope step's text
+    ///     reply. A selection is a few tool names; the cap is the backstop
+    ///     against rambling (a truncated reply still substring-parses).
     public init(
         scopeInstructions: @escaping @Sendable () -> String,
         workInstructions: @escaping @Sendable () -> String,
         catalogue: [any Tool],
-        workTools: @escaping @Sendable () -> [any Tool]
+        workTools: @escaping @Sendable () -> [any Tool],
+        scopeResponseTokenCap: Int = 64
     ) {
         self.scopeInstructions = scopeInstructions
         self.workInstructions = workInstructions
         self.catalogue = catalogue
         self.workTools = workTools
+        self.scopeResponseTokenCap = scopeResponseTokenCap
     }
 
     public var body: some LanguageModelSession.DynamicProfile {
         if stage == .scope {
+            // Manifests visible, calls impossible: the model must answer in
+            // text, and a bare tool-name list costs ~5–15 output tokens
+            // where even a minimal tool-call envelope bills ~30+. The
+            // catalogue is rendered INTO the instructions — the runtime
+            // strips registered tools from the request when tool calling
+            // is disallowed, so listing them as tools would send nothing.
             LanguageModelSession.Profile {
-                Instructions(scopeInstructions())
-                catalogue
+                Instructions(
+                    scopeInstructions() + "\n\n" + Self.renderedCatalogue(catalogue)
+                )
             }
+            .toolCallingMode(.disallowed)
+            .maximumResponseTokens(scopeResponseTokenCap)
         } else {
             LanguageModelSession.Profile {
                 Instructions(workInstructions())
                 workTools()
             }
+            .toolCallingMode(.allowed)
         }
     }
 
-    /// Parses a selection out of the model's `select_tools` argument (or, as
-    /// a fallback, out of a prose answer): every available tool name that
-    /// appears in the text, in catalogue order. Substring match, case
-    /// insensitive — robust to separators and to prose.
+    /// The scope step's tool catalogue as instruction text — name and
+    /// manifest description per finishing tool, the material the router
+    /// selects from.
+    private static func renderedCatalogue(_ tools: [any Tool]) -> String {
+        "Task tools:\n" + tools
+            .map { "- \($0.name): \($0.description)" }
+            .joined(separator: "\n")
+    }
+
+    /// Parses a selection out of the scope step's text reply: every
+    /// available tool name that appears in the text, in catalogue order.
+    /// Substring match, case insensitive — robust to separators and to
+    /// prose.
     public static func parseSelection(
         _ raw: String, from available: [String]
     ) -> [String] {
