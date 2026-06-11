@@ -3,7 +3,7 @@ import FoundationModels
 import SwiftUI
 
 /// Process-wide registry for `ViewTool`s. Data tools go straight into a
-/// `LanguageModelSession` (or a `WorkflowTool`), but view tools cannot — their
+/// `LanguageModelSession`, but view tools cannot — their
 /// output is a SwiftUI view, which is not prompt-representable — so they keep
 /// a registry whose dispatch path produces an `AnyView` the host renders
 /// directly.

@@ -2,8 +2,8 @@
 
 The tool-calling support package for Swift LLM apps. AIToolKit builds on
 FoundationModels' official `Tool` protocol: tools travel as `[any Tool]` the
-official way — into a `LanguageModelSession` — and AIToolKit adds the workflow
-layer that lets a model compose them into locally-executed DAGs.
+official way — into a `LanguageModelSession` — and AIToolKit adds the
+assistive-tool tier and the staged workflow profile on top.
 
 It has no third-party dependencies, is fully `Sendable`, and builds under
 Swift 6 strict concurrency / language mode v6.
@@ -12,105 +12,75 @@ Swift 6 strict concurrency / language mode v6.
 
 - `Tool` — FoundationModels' typed unit of work (`Arguments` / `Output`),
   re-exported, plus a `descriptor` for provider-facing export.
-- `WorkflowTool` — **the** model-facing workflow contract: one official tool
-  whose arguments schema is the other tools and their relationships.
+- `AssistiveTool` — the LLM-visible-only *unit request* tier of the tool
+  split: an official `Tool` refined so its argument is one plain-text string
+  (`TextArgument`), one integer (`IntegerArgument`), or nothing
+  (`EmptyArguments`), and its output is one compact `String` of facts. Any
+  tier of model can emit the call directly, and the schema costs a few
+  tokens instead of ~100 — the context-budget lever for large tool sets on a
+  32K-class window. Filter user-facing surfaces with `tool.isAssistive`
+  (assistive tools are never user-visible).
+- `WorkflowProfile` — ONE `LanguageModelSession.DynamicProfile` for the
+  staged workflow: the `\.workflowStage` session property
+  (`@SessionProperty`, host-flippable via `session.properties`) switches the
+  body between the **gather** stage (fact collection; assistive tools only)
+  and the **act** stage (request completion; user-visible finishing tools,
+  local deictic state injected into the instructions).
+  `WorkflowProfile.actStageHistory` is an optional history transform that
+  drops gather-stage tool chatter.
 - `ToolDescriptor` — provider-facing metadata (name, description, schemas)
   derivable from any official tool.
-- `WorkflowSpec` / `WorkflowValidator` / `WorkflowExecutor` — the workflow IR
-  and the topological, parallel-where-safe execution engine.
-- `WorkflowTwoRound*` — the two-round plan/harvest/bind wire models, pure
-  compiler, schema and prompt assets, and plan cache, for hosts that run the
-  protocol as two isolated LLM requests.
 - `ViewTool` / `ViewToolRegistry` — view-producing tools the host renders
   (these keep a registry: a SwiftUI view cannot round-trip to the model).
-- `GeneratedContent` helpers and typed errors (`ToolError`, `WorkflowError`).
+- `GeneratedContent` helpers and typed errors (`ToolError`).
 
-## Installation
-
-Add the package to your `Package.swift`:
+## The tool split
 
 ```swift
-dependencies: [
-    .package(url: "https://github.com/PangJiaxin0326/AIToolKit.git", branch: "main"),
-]
-```
-
-Then add `AIToolKit` to your target's dependencies:
-
-```swift
-.target(
-    name: "MyTarget",
-    dependencies: [
-        .product(name: "AIToolKit", package: "AIToolKit"),
-    ]
-)
-```
-
-## Usage
-
-Define tools with the official protocol:
-
-```swift
-import AIToolKit
-import FoundationModels
-
-struct EchoTool: Tool {
-    @Generable
-    struct Arguments { var text: String }
-
-    @Generable
-    struct Output { var echoed: String }
-
-    let name = "echo"
-    let description = "Echoes input back."
-
-    func call(arguments: Arguments) async throws -> Output {
-        Output(echoed: arguments.text)
+struct FindContact: AssistiveTool {
+    typealias Arguments = TextArgument
+    let name = "find_contact"
+    let description = "Look up a contact. Input: a name fragment. Returns id + display name."
+    func call(arguments: TextArgument) async throws -> String {
+        // Return "no contact matches '…'" on a miss — never throw for that:
+        // a thrown error fails the session turn; a fact lets the model adjust.
+        "contactID: c_alex_chen — Alex Chen"
     }
 }
 ```
 
-Tools can be called directly with `try await tool(arguments)`, passed straight
-to a `LanguageModelSession(tools:)`, or composed into workflows:
+Finishing tools are ordinary `@Generable`-argument `Tool`s — the semantically
+complete actions a user could tap.
+
+## The staged session
 
 ```swift
-let workflow = WorkflowTool(
-    tools: [FindContactTool(), SendMessageTool()],
-    harvester: AppContextHarvester(),               // optional: local-context slots
-    sources: ["current_contact", "foreground_document"]
+let profile = WorkflowProfile(
+    gatherInstructions: { "Collect every fact the request needs…" },
+    actInstructions: { "Complete the request now… \(localStateBlock)" },
+    assistiveTools: tools.filter(\.isAssistive),
+    finishingTools: tools.filter { !$0.isAssistive }
 )
-let session = LanguageModelSession(tools: [workflow]) {
-    Instructions(workflow.instructions())
-}
-let response = try await session.respond(to: "Tell Bob the meeting moved to 3pm")
+.model(myLanguageModel)
+.temperature(0.2)
+
+let session = LanguageModelSession(profile: profile)
+let facts = try await session.respond(to: "User request: …\n\nGather the facts…")
+session.properties.workflowStage = .act
+let final = try await session.respond(to: "Now complete the user's request.")
 ```
 
-## The unified workflow tool
+The current recipe (prompt rails, parallel tool calls, the honest cost
+model) lives in AIKit
+[`AGENTS.md`](https://github.com/PangJiaxin0326/AIKit/blob/main/AGENTS.md) —
+the single source of truth; this README only inventories the APIs.
 
-`WorkflowTool` collapses what used to be two separate layers into one
-contract. The model emits one DAG of `{id, tool, input}` nodes; data edges are
-`$ref` JSON Pointers into earlier node outputs; values that live in local or
-private state are `$slot` holes declared in `context_slots`. One
-`call(arguments:)` covers every path:
+## History
 
-- **Self-contained plan** → validated and executed locally in one call.
-- **Deterministic slots** → harvested and auto-bound; still one call.
-- **Ambiguous slots** → the tool replies `needs_binding` with candidate ids
-  and labels (never values); the model calls the same tool again with
-  `$bind` markers. The binding round rides the ordinary session tool loop —
-  no bespoke runner.
-
-Hosts that need strict round isolation (planner and binder as separate LLM
-requests), a native candidate-picker between rounds, or `WorkflowPlanCache`
-planner-skipping drive AIKit's built-in tool pair (`WorkflowPlanTool` →
-`WorkflowExecuteTool`) host-side instead; both paths share every validation
-and execution stage.
-
-Migrating from `ToolRegistry` / `WorkflowSchema` / the synthetic
-`workflow_run` descriptor? See [MIGRATION.md](MIGRATION.md).
-
-The current developer guidance and reproduction recipe live in AIKit
-[`AGENTS.md`](https://github.com/PangJiaxin0326/AIKit/blob/main/AGENTS.md). This
-README only inventories AIToolKit APIs so the recommendations stay in one place.
-The legacy workflow guide files in this package are forwarding pages to that
-source of truth.
+The previous paradigm — the lean-plan DAG (`WorkflowSpec` /
+`WorkflowValidator` / `WorkflowExecutor`, the `WorkflowTool` session tool,
+and the two-round planner/binder contract) — was removed in the profile
+refactor. It survives at `9fd1ea6` and earlier, with its measured numbers
+recorded in the experiment repo's `Findings.md` Parts IX–XVI.
+[MIGRATION.md](MIGRATION.md) covers the older `ToolRegistry`-era migration
+for codebases arriving from that generation.
