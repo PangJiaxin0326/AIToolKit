@@ -10,10 +10,12 @@ import FoundationModels
 // - **scope** — the user intent plus the *finishing* (user-visible) tool
 //   catalogue, with tool calling DISALLOWED (`tool_choice: none` on an
 //   OpenAI-style wire): the manifests are visible but nothing can execute,
-//   and the model answers in plain text with the needed tool names — a
-//   handful of output tokens, where even a minimal tool-call envelope
-//   costs ~30+. One LLM round, ended by its own short text turn; the host
-//   parses the names with `parseSelection`.
+//   and the model answers with a structured `ScopedToolSelection` (guided
+//   generation — `respond(to:generating:)`): a typed array of tool names,
+//   usually one. A dozen output tokens, where even a minimal tool-call
+//   envelope costs ~30+. One LLM round; the moment it lands the host has a
+//   TYPED selection to drive UI from (the progress-hint moment) before
+//   firing the work step.
 // - **work** — the selected finishing tools plus only the assistive unit
 //   requests *registered on them* (`ScopedFinishingTool`). All lookups and
 //   all actions happen here. The user intent is re-sent; a cut-index
@@ -60,6 +62,37 @@ public protocol ScopedFinishingTool: Tool {
 /// `.transcriptErrorHandlingPolicy(.preserveTranscript)`.
 public struct WorkflowStageComplete: Error, Sendable {
     public init() {}
+}
+
+/// The scope step's structured reply: the finishing-tool names the request
+/// needs — usually one, several only for multi-action requests. Produced by
+/// guided generation (`respond(to:generating: ScopedToolSelection.self)`),
+/// so the orchestrator holds a TYPED selection the moment step 1 lands —
+/// the hook for a per-tool progress view while the work step runs.
+@Generable
+public struct ScopedToolSelection: Sendable {
+    @Guide(description: """
+    The names of the task tools needed to complete the user's request, \
+    exactly as listed. Usually ONE name; several only when the request \
+    asks for several distinct actions.
+    """)
+    public var toolNames: [String]
+
+    public init(toolNames: [String]) {
+        self.toolNames = toolNames
+    }
+
+    /// The selection validated against the catalogue, in catalogue order:
+    /// exact case-insensitive matches plus substring salvage for decorated
+    /// items ("use send_message"); unknown names are dropped. An empty
+    /// result means the host should fall back to the full catalogue.
+    public func validated(against available: [String]) -> [String] {
+        let lowered = toolNames.map { $0.lowercased() }
+        return available.filter { name in
+            let needle = name.lowercased()
+            return lowered.contains { $0 == needle || $0.contains(needle) }
+        }
+    }
 }
 
 /// The scoped workflow profile. Stage-switched on a session property; the
