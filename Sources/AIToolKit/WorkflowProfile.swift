@@ -109,3 +109,53 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
         }
     }
 }
+
+// MARK: - Early stop (skip the closing text turn)
+
+/// Sentinel thrown out of `respond(...)` to end a stage the moment its work
+/// is done, skipping the session loop's closing text turn. Pair with
+/// `.transcriptErrorHandlingPolicy(.preserveTranscript)` so the executed
+/// tool calls and outputs stay in the transcript for the next stage.
+public struct WorkflowStageComplete: Error, Sendable {
+    public init() {}
+}
+
+/// The completion signal: an assistive no-argument tool the model is
+/// instructed to call IN THE SAME TURN as its final tool call(s), listed
+/// last. Its output arriving means the stage needs no further model turn —
+/// the host's `onToolOutput` hook throws `WorkflowStageComplete`, saving one
+/// LLM round per stage. A model that forgets simply pays the normal closing
+/// text turn (graceful fallback).
+public struct TaskCompleteTool: AssistiveTool {
+    public typealias Arguments = EmptyArguments
+
+    public static let toolName = "task_complete"
+    public var name: String { Self.toolName }
+    public let description = """
+    Signal that the current stage's tool work is finished. Call this in the \
+    SAME turn as your final tool call(s), listed LAST — never alone, and \
+    never while further tool calls are still needed.
+    """
+
+    public init() {}
+
+    public func call(arguments: EmptyArguments) async throws -> String {
+        "stage complete"
+    }
+}
+
+extension WorkflowProfile {
+    /// The early-stop hook: attach as
+    /// `.onToolOutput(perform: WorkflowProfile.stopOnTaskComplete)` together
+    /// with `.transcriptErrorHandlingPolicy(.preserveTranscript)`, and append
+    /// `TaskCompleteTool()` to each stage's tool set. The stage's
+    /// `respond(...)` then throws `WorkflowStageComplete` as soon as the
+    /// completion signal's output lands.
+    public static func stopOnTaskComplete(
+        _ call: Transcript.ToolCall, _ output: Transcript.ToolOutput
+    ) async throws {
+        if call.toolName == TaskCompleteTool.toolName {
+            throw WorkflowStageComplete()
+        }
+    }
+}
