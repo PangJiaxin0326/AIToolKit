@@ -90,15 +90,19 @@ private struct SendMessageTool: Tool {
         #expect(properties["value"]?.objectValue?["type"]?.stringValue == "string")
     }
 
-    @Test func actStageHistoryDropsToolChatter() throws {
-        // Build a transcript with prompt/response/toolCalls/toolOutput shapes
-        // is not directly constructible here; verify the filter on what we
-        // can construct — an empty list and the function's totality.
-        #expect(WorkflowProfile.actStageHistory([]).isEmpty)
+    @Test func scopedStageDefaultsToScope() {
+        #expect(ScopedWorkflowStageKey.defaultValue == .scope)
+        #expect(ScopedWorkflowStage.allCases == [.scope, .work])
     }
 
-    @Test func workflowStageDefaultsToGather() {
-        #expect(WorkflowStageKey.defaultValue == .gather)
-        #expect(WorkflowStage.allCases == [.gather, .act])
+    @Test func parseSelectionMatchesNamesInProse() {
+        let available = ["create_email_draft", "schedule_event", "send_message"]
+        #expect(ScopedWorkflowProfile.parseSelection(
+            "send_message, schedule_event", from: available
+        ) == ["schedule_event", "send_message"])
+        #expect(ScopedWorkflowProfile.parseSelection(
+            "I would use Send_Message here.", from: available
+        ) == ["send_message"])
+        #expect(ScopedWorkflowProfile.parseSelection("none", from: available).isEmpty)
     }
 }

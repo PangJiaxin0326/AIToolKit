@@ -54,7 +54,15 @@ public protocol ScopedFinishingTool: Tool {
     var registeredAssistiveTools: [any Tool] { get }
 }
 
-/// The scoped workflow profile. Stage-switched like `WorkflowProfile`; the
+/// Sentinel thrown out of the work step's `respond(...)` the moment its
+/// work is done (see `WorkTurnMonitor`), skipping the session loop's
+/// closing text turn. Pair with
+/// `.transcriptErrorHandlingPolicy(.preserveTranscript)`.
+public struct WorkflowStageComplete: Error, Sendable {
+    public init() {}
+}
+
+/// The scoped workflow profile. Stage-switched on a session property; the
 /// work step's tool set is produced per request by a closure, because it is
 /// derived from the scope step's runtime selection.
 public struct ScopedWorkflowProfile: LanguageModelSession.DynamicProfile {
