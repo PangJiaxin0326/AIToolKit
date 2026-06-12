@@ -52,6 +52,24 @@ private struct SendMessageTool: Tool {
     }
 }
 
+private struct CreateEntryTool: FinishingTool {
+    let name = "create_entry"
+    let description = "Create a journal entry."
+    var registeredAssistiveTools: [any Tool] { [] }
+    var progressText: String? { "Creating Entry…" }
+
+    func call(arguments: EmptyArguments) async throws -> String { "e_1" }
+}
+
+/// Provides no progress text — exercises the protocol's `nil` default.
+private struct SendMessageFinishingTool: FinishingTool {
+    let name = "send_message"
+    let description = "Send a message."
+    var registeredAssistiveTools: [any Tool] { [] }
+
+    func call(arguments: EmptyArguments) async throws -> String { "m_1" }
+}
+
 @Suite struct AssistiveToolTests {
     @Test func scalarArgumentsDecodeDirectlyFromGeneratedContent() async throws {
         let text = try TextArgument(GeneratedContent(json: #"{"value":"Alex Chen"}"#))
@@ -90,19 +108,36 @@ private struct SendMessageTool: Tool {
         #expect(properties["value"]?.objectValue?["type"]?.stringValue == "string")
     }
 
-    @Test func scopedStageDefaultsToScope() {
-        #expect(ScopedWorkflowStageKey.defaultValue == .scope)
-        #expect(ScopedWorkflowStage.allCases == [.scope, .work])
+    @Test func stageDefaultsToScope() {
+        #expect(WorkflowStageKey.defaultValue == .scope)
+        #expect(WorkflowStage.allCases == [.scope, .work])
     }
 
     @Test func parseSelectionMatchesNamesInProse() {
         let available = ["create_email_draft", "schedule_event", "send_message"]
-        #expect(ScopedWorkflowProfile.parseSelection(
+        #expect(WorkflowProfile.parseSelection(
             "send_message, schedule_event", from: available
         ) == ["schedule_event", "send_message"])
-        #expect(ScopedWorkflowProfile.parseSelection(
+        #expect(WorkflowProfile.parseSelection(
             "I would use Send_Message here.", from: available
         ) == ["send_message"])
-        #expect(ScopedWorkflowProfile.parseSelection("none", from: available).isEmpty)
+        #expect(WorkflowProfile.parseSelection("none", from: available).isEmpty)
+    }
+
+    @Test func selectionProgressTextIsFirstSelectedToolsText() {
+        let catalogue: [any FinishingTool] = [
+            CreateEntryTool(), SendMessageFinishingTool(),
+        ]
+        // The first selected tool's text labels the whole run; a multi-tool
+        // selection never shows a list.
+        #expect(catalogue.progressText(
+            forSelection: ["create_entry", "send_message"]
+        ) == "Creating Entry…")
+        #expect(catalogue.progressText(
+            forSelection: ["send_message", "create_entry"]
+        ) == nil)
+        // Empty or unknown selections fall back to the host's generic label.
+        #expect(catalogue.progressText(forSelection: []) == nil)
+        #expect(catalogue.progressText(forSelection: ["unknown"]) == nil)
     }
 }

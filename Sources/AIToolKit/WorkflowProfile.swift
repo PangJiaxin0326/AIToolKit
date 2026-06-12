@@ -1,23 +1,23 @@
 import Foundation
 import FoundationModels
 
-// MARK: - The scoped workflow profile (select the tools, then do the work)
+// MARK: - The workflow profile (select the tools, then do the work)
 //
-// The inverse staging of `WorkflowProfile`. Where the gather→act workflow
-// front-loads fact collection, the scoped workflow front-loads *tool
-// selection*:
+// The inverse staging of the removed gather→act profile (git history).
+// Where gather→act front-loaded fact collection, this workflow front-loads
+// *tool selection*:
 //
 // - **scope** — the user intent plus the *finishing* (user-visible) tool
 //   catalogue, with tool calling DISALLOWED (`tool_choice: none` on an
 //   OpenAI-style wire): the manifests are visible but nothing can execute,
-//   and the model answers with a structured `ScopedToolSelection` (guided
+//   and the model answers with a structured `ToolSelection` (guided
 //   generation — `respond(to:generating:)`): a typed array of tool names,
 //   usually one. A dozen output tokens, where even a minimal tool-call
 //   envelope costs ~30+. One LLM round; the moment it lands the host has a
 //   TYPED selection to drive UI from (the progress-hint moment) before
 //   firing the work step.
 // - **work** — the selected finishing tools plus only the assistive unit
-//   requests *registered on them* (`ScopedFinishingTool`). All lookups and
+//   requests *registered on them* (`FinishingTool`). All lookups and
 //   all actions happen here. The user intent is re-sent; a cut-index
 //   `historyTransform` drops every scope-step entry, so the catalogue and
 //   the selection chatter never re-enter the context. The host ends the
@@ -27,24 +27,24 @@ import FoundationModels
 // The selection is the ONLY thing that crosses the stage boundary, and it
 // crosses host-side — no model summary, no transcript carry-over.
 
-/// Which step of the scoped workflow the session is in.
-public enum ScopedWorkflowStage: String, Sendable, Hashable, CaseIterable {
+/// Which step of the workflow the session is in.
+public enum WorkflowStage: String, Sendable, Hashable, CaseIterable {
     /// Name the finishing tools the request needs (nothing executes).
     case scope
     /// Do all the work: scoped assistive lookups, then the selected actions.
     case work
 }
 
-public struct ScopedWorkflowStageKey: SessionPropertyKey {
-    public static var defaultValue: ScopedWorkflowStage { .scope }
+public struct WorkflowStageKey: SessionPropertyKey {
+    public static var defaultValue: WorkflowStage { .scope }
 }
 
 extension SessionPropertyValues {
-    /// The scoped-workflow step of this session. Hosts flip it to `.work`
+    /// The workflow step of this session. Hosts flip it to `.work`
     /// after the scope step's selection lands.
-    public var scopedWorkflowStage: ScopedWorkflowStage {
-        get { self[ScopedWorkflowStageKey.self] }
-        set { self[ScopedWorkflowStageKey.self] = newValue }
+    public var workflowStage: WorkflowStage {
+        get { self[WorkflowStageKey.self] }
+        set { self[WorkflowStageKey.self] = newValue }
     }
 }
 
@@ -52,8 +52,30 @@ extension SessionPropertyValues {
 /// needed to resolve its arguments. The scope step selects finishing tools;
 /// the work step exposes only the union of the selected tools' registrations
 /// — assistive scoping is derived from the selection, never from the task.
-public protocol ScopedFinishingTool: Tool {
+public protocol FinishingTool: Tool {
     var registeredAssistiveTools: [any Tool] { get }
+
+    /// User-facing progress text the host's assistant surface shows while the
+    /// work step performs this tool's action — e.g. "Creating Entry…",
+    /// ellipsis included; localize host-side. `nil` (the default) keeps the
+    /// host's generic busy label (typically "Thinking…").
+    var progressText: String? { get }
+}
+
+extension FinishingTool {
+    public var progressText: String? { nil }
+}
+
+extension Sequence where Element == any FinishingTool {
+    /// The progress text for a validated selection: the FIRST selected tool's
+    /// `progressText`. The hint is one line for the whole run, so a
+    /// multi-tool selection deliberately shows its first tool's text, never a
+    /// list. `nil` — empty selection, unknown name, or a tool without text —
+    /// means the host shows its generic busy label.
+    public func progressText(forSelection selection: [String]) -> String? {
+        guard let selected = selection.first else { return nil }
+        return first { $0.name == selected }?.progressText
+    }
 }
 
 /// Sentinel thrown out of the work step's `respond(...)` the moment its
@@ -66,11 +88,11 @@ public struct WorkflowStageComplete: Error, Sendable {
 
 /// The scope step's structured reply: the finishing-tool names the request
 /// needs — usually one, several only for multi-action requests. Produced by
-/// guided generation (`respond(to:generating: ScopedToolSelection.self)`),
+/// guided generation (`respond(to:generating: ToolSelection.self)`),
 /// so the orchestrator holds a TYPED selection the moment step 1 lands —
 /// the hook for a per-tool progress view while the work step runs.
 @Generable
-public struct ScopedToolSelection: Sendable {
+public struct ToolSelection: Sendable {
     @Guide(description: """
     The names of the task tools needed to complete the user's request, \
     exactly as listed. Usually ONE name; several only when the request \
@@ -95,11 +117,11 @@ public struct ScopedToolSelection: Sendable {
     }
 }
 
-/// The scoped workflow profile. Stage-switched on a session property; the
+/// The workflow profile. Stage-switched on a session property; the
 /// work step's tool set is produced per request by a closure, because it is
 /// derived from the scope step's runtime selection.
-public struct ScopedWorkflowProfile: LanguageModelSession.DynamicProfile {
-    @SessionProperty(\.scopedWorkflowStage) private var stage
+public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
+    @SessionProperty(\.workflowStage) private var stage
 
     private let scopeInstructions: @Sendable () -> String
     private let workInstructions: @Sendable () -> String
