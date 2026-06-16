@@ -49,9 +49,3 @@ public struct GenericToolError: ToolError {
     }
 }
 
-/// Errors from registry dispatch paths (`ViewToolRegistry`). Data tools no
-/// longer use a registry: pass them to a `LanguageModelSession` directly.
-public enum ToolRegistryError: Error, Sendable {
-    case notRegistered(String)
-    case decodingFailed(name: String, detail: String)
-}

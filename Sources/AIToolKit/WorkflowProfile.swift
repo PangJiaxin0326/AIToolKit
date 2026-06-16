@@ -117,6 +117,64 @@ public struct ToolSelection: Sendable {
     }
 }
 
+/// The scope step's reply in the DIRECT-CALL variant of the workflow: the
+/// selection plus, optionally, the COMPLETE arguments of the single selected
+/// tool — embedded when the model judges the user's request itself supplies
+/// every required property (no lookups needed). The host then decides the
+/// workflow's shape: arguments present → attempt the call host-side
+/// (`WorkflowDirectCall.invoke`); success finishes the workflow with no
+/// work step, failure (typed decode or the tool's own validation) falls
+/// through to the normal work step.
+///
+/// Not `@Generable` on purpose: `arguments` is a free-form object whose real
+/// schema is the selected tool's — a fixed reply schema cannot express it.
+/// The reply contract rides in the prompt (hand-rendered, like the plain
+/// selection's) and parses host-side through `GeneratedContent`.
+public struct DirectToolSelection: Sendable {
+    public var toolNames: [String]
+    /// Arguments for the single selected tool, exactly as the model emitted
+    /// them; `nil` when the model declined to embed (the normal case) or
+    /// emitted a non-object.
+    public var arguments: GeneratedContent?
+
+    public init(toolNames: [String], arguments: GeneratedContent? = nil) {
+        self.toolNames = toolNames
+        self.arguments = arguments
+    }
+
+    public init(_ content: GeneratedContent) throws {
+        self.toolNames = try content.value([String].self, forProperty: "toolNames")
+        if let embedded = try? content.value(
+            GeneratedContent.self, forProperty: "arguments"
+        ), case .structure = embedded.kind {
+            self.arguments = embedded
+        } else {
+            self.arguments = nil
+        }
+    }
+
+    /// Same catalogue validation as the plain `ToolSelection`.
+    public func validated(against available: [String]) -> [String] {
+        ToolSelection(toolNames: toolNames).validated(against: available)
+    }
+}
+
+/// Host-side execution of a scope-step direct call: decode the embedded
+/// arguments through the tool's own typed `Arguments` (the SAME path a
+/// session tool call takes — guides, optionality, and the tool's own
+/// argument validation all apply) and run the tool. Throws whatever the
+/// decode or the tool throws — the host's cue to fall through to the work
+/// step instead of finishing.
+public enum WorkflowDirectCall {
+    public static func invoke<T: Tool>(
+        _ tool: T, arguments: GeneratedContent
+    ) async throws -> String {
+        let typed = try T.Arguments(arguments)
+        let output = try await tool.call(arguments: typed)
+        return String(describing: output)
+    }
+}
+
 /// The workflow profile. Stage-switched on a session property; the
 /// work step's tool set is produced per request by a closure, because it is
 /// derived from the scope step's runtime selection.
@@ -128,6 +186,7 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
     private let catalogue: [any Tool]
     private let workTools: @Sendable () -> [any Tool]
     private let scopeResponseTokenCap: Int
+    private let scopeIncludesArgumentSchemas: Bool
 
     /// - Parameters:
     ///   - scopeInstructions: Scope-step instructions (name the tools in
@@ -141,18 +200,28 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
     ///   - scopeResponseTokenCap: Output budget for the scope step's text
     ///     reply. A selection is a few tool names; the cap is the backstop
     ///     against rambling (a truncated reply still substring-parses).
+    ///     The direct-call variant needs headroom for embedded arguments —
+    ///     raise it when `scopeIncludesArgumentSchemas` is on.
+    ///   - scopeIncludesArgumentSchemas: The DIRECT-CALL variant's switch:
+    ///     render each catalogue tool's argument schema into the scope
+    ///     instructions so the model can embed complete arguments for the
+    ///     selected tool in its reply (`DirectToolSelection`). Off by
+    ///     default — the plain selection doesn't need schemas and the
+    ///     catalogue stays ~name+description cheap.
     public init(
         scopeInstructions: @escaping @Sendable () -> String,
         workInstructions: @escaping @Sendable () -> String,
         catalogue: [any Tool],
         workTools: @escaping @Sendable () -> [any Tool],
-        scopeResponseTokenCap: Int = 64
+        scopeResponseTokenCap: Int = 64,
+        scopeIncludesArgumentSchemas: Bool = false
     ) {
         self.scopeInstructions = scopeInstructions
         self.workInstructions = workInstructions
         self.catalogue = catalogue
         self.workTools = workTools
         self.scopeResponseTokenCap = scopeResponseTokenCap
+        self.scopeIncludesArgumentSchemas = scopeIncludesArgumentSchemas
     }
 
     public var body: some LanguageModelSession.DynamicProfile {
@@ -165,7 +234,10 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
             // is disallowed, so listing them as tools would send nothing.
             LanguageModelSession.Profile {
                 Instructions(
-                    scopeInstructions() + "\n\n" + Self.renderedCatalogue(catalogue)
+                    scopeInstructions() + "\n\n" + Self.renderedCatalogue(
+                        catalogue,
+                        includeArgumentSchemas: scopeIncludesArgumentSchemas
+                    )
                 )
             }
             .toolCallingMode(.disallowed)
@@ -181,10 +253,24 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
 
     /// The scope step's tool catalogue as instruction text — name and
     /// manifest description per finishing tool, the material the router
-    /// selects from.
-    private static func renderedCatalogue(_ tools: [any Tool]) -> String {
-        "Task tools:\n" + tools
-            .map { "- \($0.name): \($0.description)" }
+    /// selects from. With `includeArgumentSchemas` (the direct-call
+    /// variant), each tool also carries its argument schema (the official
+    /// `GenerationSchema` JSON encoding) — the model cannot embed complete
+    /// arguments for a tool whose shape it has never seen.
+    private static func renderedCatalogue(
+        _ tools: [any Tool], includeArgumentSchemas: Bool = false
+    ) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return "Task tools:\n" + tools
+            .map { tool in
+                var line = "- \(tool.name): \(tool.description)"
+                if includeArgumentSchemas,
+                   let schema = try? encoder.encode(tool.parameters) {
+                    line += "\n  arguments schema: \(String(decoding: schema, as: UTF8.self))"
+                }
+                return line
+            }
             .joined(separator: "\n")
     }
 
@@ -197,6 +283,29 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
     ) -> [String] {
         let lowered = raw.lowercased()
         return available.filter { lowered.contains($0.lowercased()) }
+    }
+
+    /// Per-stage history reset: each stage sees ONLY its own instructions and
+    /// the user prompt. Tool chatter is dropped at every stage boundary. Use
+    /// this when the work step is single-shot (the scoped-workflow style: bound
+    /// args + an optional `AskTool`, no intra-stage lookup turns). For the
+    /// classic multi-round-trip work step (parallel lookups → action turn),
+    /// stick with the cut-index transform — this helper would erase the
+    /// lookup results between turns and break it.
+    public static func resetHistory(
+        _ entries: [Transcript.Entry], stage: WorkflowStage
+    ) -> [Transcript.Entry] {
+        _ = stage // future-proof: both stages have the same retention today
+        return entries.compactMap { entry in
+            switch entry {
+            case .instructions, .prompt:
+                return entry
+            case .toolCalls, .toolOutput, .response, .reasoning:
+                return nil
+            @unknown default:
+                return nil
+            }
+        }
     }
 }
 

@@ -1,6 +1,5 @@
 import Foundation
 import FoundationModels
-import SwiftUI
 import Testing
 @testable import AIToolKit
 
@@ -64,28 +63,6 @@ private struct JoinTool: Tool {
     }
 }
 
-@Generable
-private struct StringValueOutput {
-    var value: String
-}
-
-private struct LabelViewTool: ViewTool {
-    @Generable
-    struct Arguments { var title: String }
-
-    let name = "label"
-    let description = "Builds a label view."
-
-    @MainActor
-    func call(arguments: Arguments) async throws -> Text {
-        Text(arguments.title)
-    }
-}
-
-private func jsonData(_ value: some ConvertibleToGeneratedContent) -> Data {
-    Data(value.generatedContent.jsonString.utf8)
-}
-
 @Suite struct ToolDispatchTests {
     @Test func descriptorsDeriveFromHeterogeneousOfficialTools() {
         let tools: [any Tool] = [UppercaseTool(), EchoTool()]
@@ -141,23 +118,4 @@ private func jsonData(_ value: some ConvertibleToGeneratedContent) -> Data {
         #expect(GeneratedContent.number(Double.greatestFiniteMagnitude).intValue == nil)
     }
 
-}
-
-@MainActor
-@Suite struct ViewToolTests {
-    @Test func viewToolRegistryCallsTool() async throws {
-        let registry = ViewToolRegistry()
-        registry.register(LabelViewTool())
-        let input = jsonData(LabelViewTool.Arguments(title: "Hello"))
-        let view = try await registry.call(name: "label", jsonArguments: input)
-        _ = view
-    }
-
-    @Test func viewToolCanUseCallAsFunction() async throws {
-        let tool = LabelViewTool()
-        let callableView = try await tool.callAsFunction(
-            LabelViewTool.Arguments(title: "World")
-        )
-        _ = callableView
-    }
 }
