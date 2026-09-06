@@ -40,16 +40,14 @@ public enum ScopedWorkflowStage: String, Sendable, Hashable, CaseIterable {
     case done
 }
 
-public struct ScopedWorkflowStageKey: SessionPropertyKey {
-    public static var defaultValue: ScopedWorkflowStage { .scope }
-}
-
 extension SessionPropertyValues {
     /// The scoped workflow's current step. Hosts flip it from `.onToolOutput`.
-    public var scopedWorkflowStage: ScopedWorkflowStage {
-        get { self[ScopedWorkflowStageKey.self] }
-        set { self[ScopedWorkflowStageKey.self] = newValue }
-    }
+    @SessionPropertyEntry public var scopedWorkflowStage: ScopedWorkflowStage = .scope
+}
+
+@available(*, deprecated, message: "scopedWorkflowStage is declared with @SessionPropertyEntry; read and write `SessionPropertyValues.scopedWorkflowStage` directly. Raw subscripts through this key use separate storage and no longer reach it.")
+public struct ScopedWorkflowStageKey: SessionPropertyKey {
+    public static var defaultValue: ScopedWorkflowStage { .scope }
 }
 
 // MARK: - ScopingTool: the one tool exposed in scope

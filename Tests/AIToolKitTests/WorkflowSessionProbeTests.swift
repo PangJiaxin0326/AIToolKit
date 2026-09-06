@@ -60,7 +60,7 @@ private struct ProbeLanguageModel: LanguageModel {
     var configuration: ProbeConfiguration
 
     var capabilities: LanguageModelCapabilities {
-        LanguageModelCapabilities(capabilities: [.toolCalling, .guidedGeneration])
+        LanguageModelCapabilities([.toolCalling, .guidedGeneration])
     }
 
     var executorConfiguration: ProbeConfiguration { configuration }

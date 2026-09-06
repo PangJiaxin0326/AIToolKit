@@ -22,7 +22,9 @@ extension FoundationModels.Tool {
     }
 
     /// Callable shorthand matching Swift's call-as-function convention.
-    public func callAsFunction(_ arguments: Arguments) async throws -> Output {
+    /// `sending` so the shorthand stays callable with non-Sendable argument
+    /// values once ApproachableConcurrency is enabled.
+    public func callAsFunction(_ arguments: sending Arguments) async throws -> Output {
         try await call(arguments: arguments)
     }
 }

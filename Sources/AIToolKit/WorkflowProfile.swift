@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import Synchronization
 
 // MARK: - The workflow profile (select the tools, then do the work)
 //
@@ -35,17 +36,15 @@ public enum WorkflowStage: String, Sendable, Hashable, CaseIterable {
     case work
 }
 
-public struct WorkflowStageKey: SessionPropertyKey {
-    public static var defaultValue: WorkflowStage { .scope }
-}
-
 extension SessionPropertyValues {
     /// The workflow step of this session. Hosts flip it to `.work`
     /// after the scope step's selection lands.
-    public var workflowStage: WorkflowStage {
-        get { self[WorkflowStageKey.self] }
-        set { self[WorkflowStageKey.self] = newValue }
-    }
+    @SessionPropertyEntry public var workflowStage: WorkflowStage = .scope
+}
+
+@available(*, deprecated, message: "workflowStage is declared with @SessionPropertyEntry; read and write `SessionPropertyValues.workflowStage` directly. Raw subscripts through this key use separate storage and no longer reach it.")
+public struct WorkflowStageKey: SessionPropertyKey {
+    public static var defaultValue: WorkflowStage { .scope }
 }
 
 /// A user-visible finishing tool that registers the assistive unit requests
@@ -105,14 +104,14 @@ public struct ToolSelection: Sendable {
     }
 
     /// The selection validated against the catalogue, in catalogue order:
-    /// exact case-insensitive matches plus substring salvage for decorated
-    /// items ("use send_message"); unknown names are dropped. An empty
-    /// result means the host should fall back to the full catalogue.
+    /// exact case-insensitive matches, ignoring surrounding whitespace.
+    /// Unknown or decorated names are dropped. An empty result does not grant
+    /// access to the full catalogue; ask for a valid selection before acting.
     public func validated(against available: [String]) -> [String] {
-        let lowered = toolNames.map { $0.lowercased() }
+        let lowered = Set(toolNames.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
         return available.filter { name in
             let needle = name.lowercased()
-            return lowered.contains { $0 == needle || $0.contains(needle) }
+            return lowered.contains(needle)
         }
     }
 }
@@ -123,8 +122,8 @@ public struct ToolSelection: Sendable {
 /// every required property (no lookups needed). The host then decides the
 /// workflow's shape: arguments present → attempt the call host-side
 /// (`WorkflowDirectCall.invoke`); success finishes the workflow with no
-/// work step, failure (typed decode or the tool's own validation) falls
-/// through to the normal work step.
+/// work step. A decoding failure may fall through to the normal work step;
+/// an execution error may follow a side effect and must not be blindly retried.
 ///
 /// Not `@Generable` on purpose: `arguments` is a free-form object whose real
 /// schema is the selected tool's — a fixed reply schema cannot express it.
@@ -163,8 +162,8 @@ public struct DirectToolSelection: Sendable {
 /// arguments through the tool's own typed `Arguments` (the SAME path a
 /// session tool call takes — guides, optionality, and the tool's own
 /// argument validation all apply) and run the tool. Throws whatever the
-/// decode or the tool throws — the host's cue to fall through to the work
-/// step instead of finishing.
+/// decode or the tool throws. Hosts must distinguish decoding failure from
+/// execution failure: retrying the latter can duplicate a committed action.
 public enum WorkflowDirectCall {
     public static func invoke<T: Tool>(
         _ tool: T, arguments: GeneratedContent
@@ -276,13 +275,16 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
 
     /// Parses a selection out of the scope step's text reply: every
     /// available tool name that appears in the text, in catalogue order.
-    /// Substring match, case insensitive — robust to separators and to
-    /// prose.
+    /// Case-insensitive identifier matches tolerate separators and prose,
+    /// without matching a shorter tool name inside a longer one. This is a
+    /// text parser, not an authorization decision; prefer `ToolSelection`.
     public static func parseSelection(
         _ raw: String, from available: [String]
     ) -> [String] {
-        let lowered = raw.lowercased()
-        return available.filter { lowered.contains($0.lowercased()) }
+        let identifiers = Set(raw.lowercased().split {
+            !$0.isLetter && !$0.isNumber && $0 != "_" && $0 != "-"
+        }.map(String.init))
+        return available.filter { identifiers.contains($0.lowercased()) }
     }
 
     /// Per-stage history reset: each stage sees ONLY its own instructions and
@@ -328,12 +330,16 @@ public struct WorkflowProfile: LanguageModelSession.DynamicProfile {
 /// them came from a finishing (user-visible action) tool. A turn of pure
 /// lookups never stops the session; a model that replies in text instead of
 /// acting (a refusal) simply ends the respond normally.
-public final class WorkTurnMonitor: @unchecked Sendable {
-    private let lock = NSLock()
+public final class WorkTurnMonitor: Sendable {
+    /// One work turn's tallies; reset together when a new turn starts.
+    private struct TurnState {
+        var callsInTurn = 0
+        var outputsInTurn = 0
+        var finishingOutputsInTurn = 0
+    }
+
     private let finishingNames: Set<String>
-    private var callsInTurn = 0
-    private var outputsInTurn = 0
-    private var finishingOutputsInTurn = 0
+    private let state = Mutex(TurnState())
 
     public init(finishingToolNames: some Sequence<String>) {
         self.finishingNames = Set(finishingToolNames)
@@ -342,26 +348,25 @@ public final class WorkTurnMonitor: @unchecked Sendable {
     /// Call from `onToolCall`. Starts a new turn when the previous one is
     /// fully executed.
     public func recordCall(_ call: Transcript.ToolCall) {
-        lock.lock()
-        defer { lock.unlock() }
-        if outputsInTurn == callsInTurn {
-            callsInTurn = 0
-            outputsInTurn = 0
-            finishingOutputsInTurn = 0
+        state.withLock { state in
+            if state.outputsInTurn == state.callsInTurn {
+                state = TurnState()
+            }
+            state.callsInTurn += 1
         }
-        callsInTurn += 1
     }
 
     /// Call from `onToolOutput`. Returns `true` the moment the work is done
     /// — the turn is fully executed and performed at least one finishing
     /// action — i.e. the moment to throw `WorkflowStageComplete`.
     public func recordOutput(_ call: Transcript.ToolCall) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        outputsInTurn += 1
-        if finishingNames.contains(call.toolName) {
-            finishingOutputsInTurn += 1
+        state.withLock { state in
+            state.outputsInTurn += 1
+            if finishingNames.contains(call.toolName) {
+                state.finishingOutputsInTurn += 1
+            }
+            return state.outputsInTurn == state.callsInTurn
+                && state.finishingOutputsInTurn > 0
         }
-        return outputsInTurn == callsInTurn && finishingOutputsInTurn > 0
     }
 }

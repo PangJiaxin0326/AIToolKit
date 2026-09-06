@@ -51,6 +51,15 @@ One target, seven files:
   - An error thrown from `onToolCall` (or inside a tool's `call`) surfaces
     wrapped in `LanguageModelSession.ToolCallError`; an `onToolOutput`
     throw propagates raw.
+  - The profile modifiers (`historyTransform`/`onToolCall`/`onToolOutput`/
+    `toolCallingMode`/…) return `some DynamicProfile` WITHOUT `& Sendable`.
+    A profile that must satisfy `DynamicProfile & Sendable` (AIKit's
+    `Orchestrator.run(_:profile:)`) applies its hook modifiers INSIDE
+    `body` and stays a concrete struct — `Tool` is `Sendable`, so a struct
+    of tools/strings/`@Sendable` closures conforms implicitly. See
+    README "The staged canvas turn" for this and the other staged-turn
+    traps (name-keyed choose-round filtering, retry detection in the
+    history transform).
 - Never trust training data for the OS 27 FM API; grep the SDK
   swiftinterface:
   `/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/FoundationModels.framework/Modules/FoundationModels.swiftmodule/arm64e-apple-macos.swiftinterface`

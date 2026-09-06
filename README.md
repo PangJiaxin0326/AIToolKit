@@ -99,6 +99,7 @@ let selection = try await session.respond(
     generating: ToolSelection.self
 ).content
 state.selection = selection.validated(against: finishingNames)
+// If the selection is empty, ask for a valid selection before executing tools.
 state.cutIndex = session.transcript.count
 state.stage = .work
 session.properties.workflowStage = .work
@@ -156,6 +157,66 @@ Every call is structurally necessary: the scope call (~330 input tokens,
 refusal tasks = 2 calls; one-lookup actions = 3; a depth-N opaque chain =
 N+2. Measured on a 20-task battery (mini-class model): 19/20, step-1 mean
 0.66 s at ~9 output tokens, total mean 3.31 s.
+
+## The staged canvas turn (choose → scoped work → caption)
+
+The select-then-work idea, applied to a whole ASSISTANT TURN instead of one
+mutation. Motivation is measured: a classic turn that registers the full app
+catalogue re-sends every tool schema on every round (in the reference app:
+41 tools ≈ 5.4K prompt tokens/round × 2–3 rounds/turn = 13.5–20.4K
+tokens/turn). Staging the turn cuts that ~10× (~1.4–2.6K/turn) because no
+round ever carries a schema the stage doesn't need.
+
+One custom `LanguageModelSession.DynamicProfile`, one `respond`, four
+stages flipped by the tool hooks (host-owned state — the
+`ScopedWorkflowProfile` pattern):
+
+```
+.choose   →  ONE selection tool (`tool_choice: required`) + a compact brief.
+             The model picks 1–N units of work (in the reference app:
+             canvases — a kind, a data area, a composed title).
+.work     →  history DROPS the choose interaction; tools are ONLY the chosen
+             units' tools (a @Sendable plan closure maps choices → tool
+             instances + the "finishing" names that count as coverage).
+             Flips forward when coverage reaches the chosen count.
+.caption  →  no tools, `.disallowed`, tokens capped. History is projected to
+             the instructions ALONE; the host bakes the user's request and
+             the work results into the caption brief. The natural text reply
+             ends the respond — no throwing sentinel on the happy path.
+.classic  →  an explicitly host-authorized full-catalogue workflow.
+             Never enter it automatically because selection was invalid.
+```
+
+Traps, each one hit while building the reference implementation
+(LifeOS `LifeScopedTurn.swift`):
+
+- **Modifier chains erase `Sendable`.** `.historyTransform`/`.onToolCall`/
+  `.onToolOutput` return `some DynamicProfile` (NOT `& Sendable`), so a
+  factory cannot return a modified chain where `DynamicProfile & Sendable`
+  is required (e.g. AIKit's `Orchestrator.run(_:profile:)`). Put the hook
+  modifiers INSIDE the profile's `body` and return the concrete struct —
+  `Tool` is `Sendable`, so a struct of tools, strings, and `@Sendable`
+  closures conforms implicitly.
+- **Filter the choose round by NAME + call id, not by cut index.** Inside
+  one respond there is no host code between rounds to record a cut index.
+  Record the selection tool's call ids in `.onToolCall`; the transform drops
+  `toolCalls` entries whose calls are all the selection tool and
+  `toolOutput` entries whose id matches. Work rounds keep their own chatter
+  (a stage-keyed drop-all would erase lookup results between rounds and
+  loop the model).
+- **Detect retries in the history transform.** A runtime retry runs a FRESH
+  session against the same profile instance. A transcript with no
+  `toolCalls` entries while the stage is past `.choose` is that retry —
+  reset the host state to `.choose` there, or the new session starts on a
+  stale stage.
+- **Statics on a `@MainActor` type are main-actor too.** Instruction
+  builders and validators called from `@Sendable` hook closures must live on
+  a `nonisolated` type (the profile struct), not in the host-environment
+  extension that builds the profile.
+- **Bare profile for orchestrator runs.** When the profile is handed to
+  AIKit's `Orchestrator.run(_:profile:)`, do not pre-apply `.model` /
+  `.temperature` — the orchestrator owns both. Per-stage
+  `.maximumResponseTokens` on the caption branch is fine.
 
 ## Guardrails
 

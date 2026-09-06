@@ -34,28 +34,24 @@ public enum ProgressiveStage: String, Sendable, Hashable, CaseIterable {
     case build
 }
 
+extension SessionPropertyValues {
+    /// The progressive workflow's phase. Hosts flip it to `.build` after the
+    /// plan lands.
+    @SessionPropertyEntry public var progressiveStage: ProgressiveStage = .plan
+
+    /// The zero-based index of the component the current build step constructs.
+    /// Hosts increment it as they advance through the plan.
+    @SessionPropertyEntry public var progressiveStep: Int = 0
+}
+
+@available(*, deprecated, message: "progressiveStage is declared with @SessionPropertyEntry; read and write `SessionPropertyValues.progressiveStage` directly. Raw subscripts through this key use separate storage and no longer reach it.")
 public struct ProgressiveStageKey: SessionPropertyKey {
     public static var defaultValue: ProgressiveStage { .plan }
 }
 
+@available(*, deprecated, message: "progressiveStep is declared with @SessionPropertyEntry; read and write `SessionPropertyValues.progressiveStep` directly. Raw subscripts through this key use separate storage and no longer reach it.")
 public struct ProgressiveStepKey: SessionPropertyKey {
     public static var defaultValue: Int { 0 }
-}
-
-extension SessionPropertyValues {
-    /// The progressive workflow's phase. Hosts flip it to `.build` after the
-    /// plan lands.
-    public var progressiveStage: ProgressiveStage {
-        get { self[ProgressiveStageKey.self] }
-        set { self[ProgressiveStageKey.self] = newValue }
-    }
-
-    /// The zero-based index of the component the current build step constructs.
-    /// Hosts increment it as they advance through the plan.
-    public var progressiveStep: Int {
-        get { self[ProgressiveStepKey.self] }
-        set { self[ProgressiveStepKey.self] = newValue }
-    }
 }
 
 /// The progressive profile. Stage-switched on a session property like

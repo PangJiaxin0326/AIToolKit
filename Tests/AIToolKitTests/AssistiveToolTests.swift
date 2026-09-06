@@ -109,7 +109,10 @@ private struct SendMessageFinishingTool: FinishingTool {
     }
 
     @Test func stageDefaultsToScope() {
-        #expect(WorkflowStageKey.defaultValue == .scope)
+        // Read the default through a real session's properties — the
+        // `@SessionPropertyEntry` accessor, not a raw key.
+        let session = LanguageModelSession(model: SystemLanguageModel.default)
+        #expect(session.properties.workflowStage == .scope)
         #expect(WorkflowStage.allCases == [.scope, .work])
     }
 

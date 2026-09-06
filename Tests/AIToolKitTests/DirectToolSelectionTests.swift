@@ -62,6 +62,13 @@ private struct DirectSendError: Error {
             == ["send_message"])
     }
 
+    @Test func selectionNeverEnablesOverlappingOrDecoratedNames() {
+        let available = ["send", "send_message", "message"]
+        #expect(ToolSelection(toolNames: [" SEND_MESSAGE "]).validated(against: available) == ["send_message"])
+        #expect(ToolSelection(toolNames: ["do not send", "unknown"]).validated(against: available).isEmpty)
+        #expect(WorkflowProfile.parseSelection("Use `send_message`.", from: available) == ["send_message"])
+    }
+
     @Test func invokeDecodesTypedArgumentsAndRunsTheTool() async throws {
         let arguments = try GeneratedContent(
             json: #"{"contactID": "c_1", "body": "On my way"}"#
